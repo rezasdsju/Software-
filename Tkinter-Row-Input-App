@@ -1,0 +1,32 @@
+import tkinter as tk
+class MyApp:
+    def __init__(self,root):
+        self.root=root
+        self.root.title('Row value Input')
+        self.label=tk.Label(self.root,text='Enter the row element:',fg='blue')
+        self.label.pack(pady=(10,0))
+        
+        self.entry=tk.Entry(self.root,fg='black')
+        self.entry.insert(0,'e.g.5')
+        self.entry.bind('<FocusIn>',self.clear_placeholder)
+        self.entry.pack()
+        
+        
+        self.button=tk.Button(self.root,text='Submit',fg='red',command=self.show_input)
+        self.button.pack(pady=5)
+        
+        self.output_label=tk.Label(self.root,text='')
+        self.output_label.pack()
+        
+    def clear_placeholder(self,event):
+        if self.entry.get()=='e.g.5':
+            self.entry.delete(0,tk.END)
+            self.entry.config(fg='black')
+            
+    def show_input(self):
+        value=self.entry.get()
+        print(f"You Entered:{value}")
+        self.output_label.config(text=f"You Entered: {value}")
+root=tk.Tk()
+MyApp(root)
+root.mainloop()
