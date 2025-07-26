@@ -1,0 +1,139 @@
+import tkinter as tk
+from tkinter import messagebox,filedialog
+import pandas as pd
+class GPAApp:
+    def __init__(self,root):
+        self.root=root
+        self.root.title('GPA Calculator')
+        self.all_data=[]
+        self.reset_main_input()
+    def reset_main_input(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        self.subject_entries=[]
+        self.mark_entries=[]
+        
+        tk.Label(self.root,text='Enter Student Name:',fg='blue').pack(pady=(10,0))
+        self.name_entry=tk.Entry(self.root,width=40)
+        self.name_entry.bind('<Return>',lambda event:self.num_entry.focus_set())
+        self.name_entry.pack()
+        
+        tk.Label(self.root,text='Enter Number of Subjects:',fg='blue').pack(pady=(10,0))
+        self.num_entry=tk.Entry(self.root,width=40)
+        self.num_entry.bind('<Return>',lambda event: self.generate_student_inputs())
+        self.num_entry.pack()
+        
+        tk.Button(self.root,text='Next',fg='red',command=self.generate_student_inputs).pack(pady=10)
+        
+        self.output_label=tk.Label(self.root,text='',fg='red')
+        self.output_label.pack()
+        self.name_entry.focus_set()
+
+    def generate_student_inputs(self):
+        name=self.name_entry.get().strip()
+        try:
+            num_subjects=int(self.num_entry.get().strip())
+            if not name or num_subjects<=0:
+                raise ValueError
+        except ValueError:
+            self.output_label.config(text="Invalid name or number of subject")
+            return
+        self.student_name=name
+        self.num_subjects=num_subjects
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        tk.Label(self.root,text=f"Student: {self.student_name}",fg='blue').pack(pady=5)
+        self.subject_frame=tk.Frame(self.root)
+        self.subject_frame.pack()
+        for i in range(num_subjects):
+            tk.Label(self.subject_frame,text=f"Subject {i+1} Name",fg='blue').grid(row=i,column=0,padx=5,pady=2)
+            sub_entry=tk.Entry(self.subject_frame)
+            sub_entry.grid(row=i,column=1,padx=5,pady=2)
+            
+            tk.Label(self.subject_frame,text='Mark',fg='blue').grid(row=i,column=2,padx=5,pady=2)
+            mark_entry=tk.Entry(self.subject_frame)
+            mark_entry.grid(row=i,column=3,padx=5,pady=2)
+            
+            if i == 0:
+                sub_entry.focus_set()
+            
+            self.subject_entries.append(sub_entry)
+            self.mark_entries.append(mark_entry)
+            sub_entry.bind('<Return>',lambda event,m=mark_entry:m.focus_set())
+            if i<num_subjects-1:
+                def focus_next(i=i):
+                    return lambda event:self.subject_entries[i+1].focus_set()
+                mark_entry.bind('<Return>',focus_next())
+            else:
+                mark_entry.bind('<Return>',lambda event:self.store_student_data())
+        tk.Button(self.root,text='Submit',fg='red',command=self.store_student_data).pack(pady=10)
+        
+    def store_student_data(self):
+        subjects=[]
+        marks=[]
+        for i in range(self.num_subjects):
+            sub=self.subject_entries[i].get().strip()
+            mark=self.mark_entries[i].get().strip()
+            if sub=='' or mark=='':
+                self.output_label.config(text='All field must be filled')
+                return
+            try:
+                mark=float(mark)
+                if not (0<=mark<=100):
+                    raise ValueError
+            except ValueError:
+                self.output_label.config(text='Invalid Mark for subject {i+1}')
+                return
+            subjects.append(sub)
+            marks.append(mark)
+        gpa=self.calculate_gpa(marks)
+        student_data={"Student name":self.student_name}
+        for idx,(sub,m) in enumerate(zip(subjects,marks),1):
+            student_data[f"Subject {idx}"]=sub
+            student_data[f"Mark {idx}"]=m
+        student_data['GPA']=gpa
+        self.all_data.append(student_data)
+        messagebox.showinfo('GPA Calculated',f"{self.student_name}'s GPA: {gpa}")
+        self.ask_continue_or_quit()
+        
+    def calculate_gpa(self,marks):
+        points=[]
+        for mark in marks:
+            if mark>=80:
+                points.append(5.00)
+            elif mark>=70:
+                points.append(4.00)
+            elif mark>=60:
+                points.append(3.50)
+            elif mark>=50:
+                points.append(3.00)
+            elif mark>=40:
+                points.append(2.00)
+            else:
+                return 0.00
+        return round((sum(points)/len(points)),2)
+    def ask_continue_or_quit(self):
+        response=messagebox.askquestion('Continue:','Do you want to Enter more students data?')
+        if response=='yes':
+            self.reset_main_input()
+        else:
+            self.show_final_dataframe()
+    def show_final_dataframe(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        df=pd.DataFrame(self.all_data)
+        if df.empty:
+            tk.Label(self.root,text='No Data to Display',fg='red').pack(pady=5)
+            return
+        text=df.to_string(index=False)
+        tk.Label(self.root,text=text,font=('Courier',10),justify='left').pack()
+        tk.Button(self.root,text='Download CSV',fg='green',command=lambda:self.save_csv(df)).pack()
+    def save_csv(self,df):
+        file_path=filedialog.asksaveasfilename(defaultextension='.csv',filetype=[('CSV files','*.csv')])
+        if file_path:
+            df.to_csv(file_path,index=False)
+            messagebox.showinfo('Success','CSV saved successfully')
+root=tk.Tk()
+GPAApp(root)
+root.mainloop()
+        
