@@ -110,8 +110,22 @@ class GPAApp:
             elif mark>=40:
                 points.append(2.00)
             else:
-                return 0.00
-        return round((sum(points)/len(points)),2)
+                x=0.00
+                return f"{x} (Failed)"
+        gpa=round((sum(points)/len(points)),2)
+        if gpa==5.00:
+            return '5.00 (A+)'
+        elif gpa>=4.00:
+            return f"{gpa} (A)"
+        elif gpa>=3.50:
+            return f"{gpa} (A-)"
+        elif gpa>=3.00:
+            return f"{gpa} (B)"
+        elif gpa>=2.00:
+            return f"{gpa} (C)"
+        else:
+            return f"{gpa} (D)"
+        
     def ask_continue_or_quit(self):
         response=messagebox.askquestion('Continue:','Do you want to Enter more students data?')
         if response=='yes':
