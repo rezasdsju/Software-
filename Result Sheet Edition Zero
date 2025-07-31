@@ -1,0 +1,354 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import pandas as pd
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.platypus import Table, TableStyle
+
+class GPAApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("\U0001F393 GPA Calculation and Result Sheet")
+        self.root.geometry("700x600")
+        self.root.configure(bg="#e6f0ff")
+        self.root.resizable(False, False)
+
+        self.all_data = []
+        self.reset_main_input()
+
+    def reset_main_input(self):
+        self.clear_window()
+        self.subject_entries = []
+        self.mark_entries = []
+
+        # Main Frame with padding
+        main_frame = tk.Frame(self.root, bg="#e6f0ff", padx=30, pady=20)
+        main_frame.pack(fill='both', expand=True)
+
+        tk.Label(main_frame, text="Enter Student Name:", fg="#003366", bg="#e6f0ff", font=('Segoe UI', 14, 'bold')).pack(anchor='w', pady=(0,8))
+        self.name_entry = tk.Entry(main_frame, width=45, font=('Segoe UI', 12), relief='solid', bd=1)
+        self.name_entry.pack(anchor='w')
+        self.name_entry.bind('<Return>', lambda event: self.num_entry.focus_set())
+
+        tk.Label(main_frame, text="Enter Number of Subjects:", fg="#003366", bg="#e6f0ff", font=('Segoe UI', 14, 'bold')).pack(anchor='w', pady=(20,8))
+        self.num_entry = tk.Entry(main_frame, width=45, font=('Segoe UI', 12), relief='solid', bd=1)
+        self.num_entry.pack(anchor='w')
+        self.num_entry.bind('<Return>', lambda event: self.generate_student_inputs())
+
+        tk.Button(main_frame, text='Next ➡', fg='white', bg='#0059b3', font=('Segoe UI', 13, 'bold'), 
+                  activebackground='#004080', activeforeground='white', command=self.generate_student_inputs).pack(pady=30)
+
+        self.output_label = tk.Label(main_frame, text='', fg='#cc0000', bg="#e6f0ff", font=('Segoe UI', 11, 'italic'))
+        self.output_label.pack()
+
+        self.name_entry.focus_set()
+
+    def generate_student_inputs(self):
+        name = self.name_entry.get().strip()
+        try:
+            num_subjects = int(self.num_entry.get().strip())
+            if not name or num_subjects <= 0:
+                raise ValueError
+        except ValueError:
+            self.output_label.config(text="❌ Invalid name or number of subjects.")
+            return
+
+        self.student_name = name
+        self.num_subjects = num_subjects
+        self.clear_window()
+
+        title_frame = tk.Frame(self.root, bg="#e6f0ff", pady=10)
+        title_frame.pack()
+        tk.Label(title_frame, text=f"Student: {self.student_name}", fg="#004080", bg="#e6f0ff", font=('Segoe UI', 16, 'bold')).pack()
+
+        self.subject_frame = tk.Frame(self.root, bg="#e6f0ff", padx=20, pady=10)
+        self.subject_frame.pack()
+
+        for i in range(num_subjects):
+            tk.Label(self.subject_frame, text=f"Subject {i+1} Name:", fg='#003366', bg="#e6f0ff", font=('Segoe UI', 12)).grid(row=i, column=0, sticky='w', padx=10, pady=6)
+            sub_entry = tk.Entry(self.subject_frame, font=('Segoe UI', 12), width=25, relief='solid', bd=1)
+            sub_entry.grid(row=i, column=1, padx=10, pady=6)
+
+            tk.Label(self.subject_frame, text="Mark:", fg='#003366', bg="#e6f0ff", font=('Segoe UI', 12)).grid(row=i, column=2, sticky='w', padx=10, pady=6)
+            mark_entry = tk.Entry(self.subject_frame, font=('Segoe UI', 12), width=10, relief='solid', bd=1)
+            mark_entry.grid(row=i, column=3, padx=10, pady=6)
+
+            if i == 0:
+                sub_entry.focus_set()
+
+            self.subject_entries.append(sub_entry)
+            self.mark_entries.append(mark_entry)
+
+            sub_entry.bind('<Return>', lambda event, m=mark_entry: m.focus_set())
+            if i < num_subjects - 1:
+                def focus_next(i=i):
+                    return lambda event: self.subject_entries[i+1].focus_set()
+                mark_entry.bind('<Return>', focus_next())
+            else:
+                mark_entry.bind('<Return>', lambda event: self.store_student_data())
+
+        btn_frame = tk.Frame(self.root, bg="#e6f0ff", pady=15)
+        btn_frame.pack()
+        tk.Button(btn_frame, text='Submit ✅', fg='white', bg='#28a745', font=('Segoe UI', 14, 'bold'), 
+                  activebackground='#19692c', activeforeground='white', command=self.store_student_data).pack()
+
+        self.output_label = tk.Label(self.root, text='', fg='#cc0000', bg="#e6f0ff", font=('Segoe UI', 11, 'italic'))
+        self.output_label.pack(pady=(10,0))
+
+    def store_student_data(self):
+        subjects = []
+        marks = []
+        for i in range(self.num_subjects):
+            sub = self.subject_entries[i].get().strip()
+            mark = self.mark_entries[i].get().strip()
+            if sub == '' or mark == '':
+                self.output_label.config(text="❌ All fields must be filled.")
+                return
+            try:
+                mark = float(mark)
+                if not (0 <= mark <= 100):
+                    raise ValueError
+            except ValueError:
+                self.output_label.config(text=f'❌ Invalid mark for Subject {i+1}')
+                return
+            subjects.append(sub)
+            marks.append(mark)
+
+        gpa = self.calculate_gpa(marks)
+        student_data = {"Student name": self.student_name}
+        for idx, (sub, m) in enumerate(zip(subjects, marks), 1):
+            student_data[f"Subject {idx}"] = sub
+            student_data[f"Mark {idx}"] = m
+        student_data['GPA'] = gpa
+        self.all_data.append(student_data)
+
+        self.show_single_student_result(student_data)
+
+    def show_single_student_result(self, student_data):
+        self.clear_window()
+        header_color = "#007acc"
+        bg_color = "#f0f8ff"
+        row_bg = "#f9faff"
+        alt_row_bg = "#e6f2ff"
+
+        tk.Label(self.root, text=f"Student Name: {student_data['Student name']}", font=('Segoe UI', 16, 'bold'), fg=header_color, bg=bg_color).pack(pady=(15, 10))
+
+        header_frame = tk.Frame(self.root, bg=bg_color, padx=20, pady=10)
+        header_frame.pack()
+
+        tk.Label(header_frame, text="Subject", width=20, anchor='w', font=('Segoe UI', 12, 'bold'), bg=header_color, fg="white").grid(row=0, column=0, sticky='w')
+        tk.Label(header_frame, text="Mark", width=10, anchor='w', font=('Segoe UI', 12, 'bold'), bg=header_color, fg="white").grid(row=0, column=1, sticky='w')
+        tk.Label(header_frame, text="Individual Subject GPA", width=20, anchor='w', font=('Segoe UI', 12, 'bold'), bg=header_color, fg="white").grid(row=0, column=2, sticky='w')
+
+        for i in range(self.num_subjects):
+            subj = student_data[f"Subject {i+1}"]
+            mark = student_data[f"Mark {i+1}"]
+            gpa = self._mark_to_gpa(float(mark))
+
+            bg = row_bg if i % 2 == 0 else alt_row_bg
+            tk.Label(header_frame, text=subj, width=20, anchor='w', font=('Segoe UI', 12), bg=bg).grid(row=i+1, column=0, sticky='w')
+            tk.Label(header_frame, text=str(mark), width=10, anchor='w', font=('Segoe UI', 12), bg=bg).grid(row=i+1, column=1, sticky='w')
+            tk.Label(header_frame, text=gpa, width=20, anchor='w', font=('Segoe UI', 12), bg=bg).grid(row=i+1, column=2, sticky='w')
+
+        tk.Label(self.root, text=f"Final GPA: {student_data['GPA']}", font=('Segoe UI', 14, 'bold'), bg=bg_color, pady=15).pack()
+
+        btn_frame = tk.Frame(self.root, bg=bg_color)
+        btn_frame.pack(pady=5)
+
+        tk.Button(btn_frame, text=f"📥 Download CSV of {student_data['Student name']}'s statistics", fg='white', bg='#17a2b8', font=('Segoe UI', 12), 
+                  activebackground='#117a8b', activeforeground='white', command=lambda: self.save_individual_csv(student_data)).pack(pady=5, fill='x')
+        tk.Button(btn_frame, text=f"📄 Download PDF of {student_data['Student name']}'s statistics", fg='white', bg='#6f42c1', font=('Segoe UI', 12), 
+                  activebackground='#4b2c91', activeforeground='white', command=lambda: self.save_individual_pdf(student_data)).pack(pady=5, fill='x')
+
+        tk.Label(self.root, text="Do you want to enter another student?", font=('Segoe UI', 13), bg=bg_color).pack(pady=(25, 10))
+
+        options_frame = tk.Frame(self.root, bg=bg_color)
+        options_frame.pack()
+
+        tk.Button(options_frame, text='✅ Yes', bg='#28a745', fg='white', font=('Segoe UI', 12, 'bold'), width=10, 
+                  activebackground='#19692c', activeforeground='white', command=self.reset_main_input).pack(side='left', padx=15)
+        tk.Button(options_frame, text='❌ No', bg='#dc3545', fg='white', font=('Segoe UI', 12, 'bold'), width=10, 
+                  activebackground='#a71d2a', activeforeground='white', command=self.show_final_export_options).pack(side='left', padx=15)
+
+    def show_final_export_options(self):
+        self.clear_window()
+        bg_color = "#e6f0ff"
+        self.root.configure(bg=bg_color)
+
+        tk.Label(self.root, text="All Students' Data Entry Completed!", font=('Segoe UI', 16, 'bold'), fg='#007acc', bg=bg_color).pack(pady=(30, 20))
+
+        btn_frame = tk.Frame(self.root, bg=bg_color)
+        btn_frame.pack(pady=20)
+
+        tk.Button(btn_frame, text="⬇ Download Combined CSV", font=('Segoe UI', 14), bg="#17a2b8", fg="white", width=25,
+                  activebackground="#117a8b", activeforeground="white", command=self.export_all_csv).pack(pady=10)
+
+        tk.Button(btn_frame, text="⬇ Download Combined PDF", font=('Segoe UI', 14), bg="#6f42c1", fg="white", width=25,
+                  activebackground="#4b2c91", activeforeground="white", command=self.export_all_pdf).pack(pady=10)
+
+    def export_all_csv(self):
+        if not self.all_data:
+            messagebox.showwarning("No Data", "No student data to export!")
+            return
+        df = pd.DataFrame(self.all_data)
+        file_path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV files', '*.csv')], initialfile="All_Students_Statistics.csv")
+        if file_path:
+            df.to_csv(file_path, index=False)
+            messagebox.showinfo("✅ Success", "CSV file saved successfully!")
+
+    def export_all_pdf(self):
+        if not self.all_data:
+            messagebox.showwarning("No Data", "No student data to export!")
+            return
+
+        file_path = filedialog.asksaveasfilename(defaultextension='.pdf', filetypes=[('PDF files', '*.pdf')], initialfile="All_Students_Statistics.pdf")
+        if not file_path:
+            return
+
+        c = canvas.Canvas(file_path, pagesize=letter)
+        width, height = letter
+        y = height - 50
+        margin_x = 50
+        line_height = 20
+
+        for data in self.all_data:
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(margin_x, y, f"Student Name: {data['Student name']}")
+            y -= line_height + 5
+
+            table_data = [["Subject", "Mark", "Individual Subject GPA"]]
+            # Calculate number of subjects dynamically
+            num_subjects = (len(data) - 2) // 2  # subtract name and GPA keys
+
+            for i in range(1, num_subjects + 1):
+                subject = data.get(f"Subject {i}")
+                mark = data.get(f"Mark {i}")
+                if subject and mark is not None:
+                    gpa = self._mark_to_gpa(float(mark))
+                    table_data.append([subject, str(mark), gpa])
+
+            table = Table(table_data, colWidths=[250, 100, 150])
+            style = TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ])
+            table.setStyle(style)
+            table.wrapOn(c, width, height)
+            table.drawOn(c, margin_x, y - table._height)
+            y -= table._height + 40
+
+            c.setFont("Helvetica-Bold", 13)
+            c.drawString(margin_x, y, f"Final GPA: {data['GPA']}")
+            y -= 50
+
+            if y < 150:
+                c.showPage()
+                y = height - 50
+
+        c.save()
+        messagebox.showinfo("✅ Success", "PDF file saved successfully!")
+
+    def save_individual_csv(self, student_data):
+        file_path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV files', '*.csv')], initialfile=f"{student_data['Student name']}_statistics.csv")
+        if file_path:
+            df = pd.DataFrame([student_data])
+            df.to_csv(file_path, index=False)
+            messagebox.showinfo("✅ Success", "CSV file saved successfully!")
+
+    def save_individual_pdf(self, student_data):
+        file_path = filedialog.asksaveasfilename(defaultextension='.pdf', filetypes=[('PDF files', '*.pdf')], initialfile=f"{student_data['Student name']}_statistics.pdf")
+        if not file_path:
+            return
+
+        c = canvas.Canvas(file_path, pagesize=letter)
+        width, height = letter
+        c.setTitle(f"{student_data['Student name']} Statistics")
+
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(50, height - 50, f"Student Name: {student_data['Student name']}")
+
+        data = [["Subject", "Mark", "Individual Subject GPA"]]
+        for i in range(self.num_subjects):
+            subj = student_data[f"Subject {i+1}"]
+            mark = float(student_data[f"Mark {i+1}"])
+            gpa = self._mark_to_gpa(mark)
+            data.append([subj, f"{mark}", gpa])
+
+        table = Table(data, colWidths=[250, 100, 150])
+        style = TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ])
+        table.setStyle(style)
+
+        table_x = 50
+        table_y = height - 280
+        table.wrapOn(c, width, height)
+        table.drawOn(c, table_x, table_y)
+
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(50, table_y - table._height - 35, f"Final GPA: {student_data['GPA']}")
+
+        c.save()
+        messagebox.showinfo("✅ Success", "PDF file saved successfully!")
+
+    def calculate_gpa(self, marks):
+        points = []
+        for mark in marks:
+            if mark >= 80:
+                points.append(5.00)
+            elif mark >= 70:
+                points.append(4.00)
+            elif mark >= 60:
+                points.append(3.50)
+            elif mark >= 50:
+                points.append(3.00)
+            elif mark >= 40:
+                points.append(2.00)
+            else:
+                return f"0.00 (Failed)"
+        gpa = round((sum(points) / len(points)), 2)
+        if gpa == 5.00:
+            return '5.00 (A+)'
+        elif gpa >= 4.00:
+            return f"{gpa} (A)"
+        elif gpa >= 3.50:
+            return f"{gpa} (A-)"
+        elif gpa >= 3.00:
+            return f"{gpa} (B)"
+        elif gpa >= 2.00:
+            return f"{gpa} (C)"
+        else:
+            return f"{gpa} (D)"
+
+    def _mark_to_gpa(self, mark):
+        if mark >= 80:
+            return "5"
+        elif mark >= 70:
+            return "4"
+        elif mark >= 60:
+            return "3.5"
+        elif mark >= 50:
+            return "3"
+        elif mark >= 40:
+            return "2"
+        else:
+            return "0 (Failed)"
+
+    def clear_window(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = GPAApp(root)
+    root.mainloop()
