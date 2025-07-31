@@ -1,0 +1,954 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import pandas as pd
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.platypus import Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+import webbrowser
+import os
+from datetime import datetime
+
+class ProfessionalGPAApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("🎓 Academic Performance Analyzer")
+        self.root.geometry("900x700") # Slightly reduced default height
+        self.root.configure(bg="#e8f0f8") # Lighter background for a modern feel
+        self.root.resizable(True, True)
+        self.root.minsize(800, 650) # Set a sensible minimum size
+
+        # Configure root grid to allow content to expand
+        self.root.grid_rowconfigure(0, weight=1) # Main content area takes up space
+        self.root.grid_columnconfigure(0, weight=1)
+
+        # Set application icon (platform-dependent, so keep it in try-except)
+        try:
+            # Safely get the script directory or current working directory
+            script_dir = None
+            if '__file__' in locals():
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+            else:
+                # Fallback for environments where __file__ is not defined (e.g., interactive shell)
+                script_dir = os.getcwd() 
+                print("Warning: '__file__' not defined. Using current working directory for icon path.")
+
+            if script_dir:
+                icon_path = os.path.join(script_dir, 'gpa_icon.ico')
+                if os.path.exists(icon_path):
+                    self.root.iconbitmap(icon_path)
+                else:
+                    print(f"Warning: gpa_icon.ico not found at {icon_path}. Skipping icon setting.")
+            else:
+                print("Warning: Could not determine script directory. Skipping icon setting.")
+        except Exception as e:
+            # Catch any other potential errors during icon setting
+            print(f"Error setting icon: {e}. Ensure 'gpa_icon.ico' is in the same directory as the script.")
+            pass # Continue without icon if there's an issue
+        
+        # Application styling with a more refined modern look
+        self.style = ttk.Style()
+        self.style.theme_use('clam') # Use a more modern theme like 'clam', 'alt', 'vista', or 'xpnative'
+        
+        self.style.configure('TFrame', background="#e8f0f8")
+        self.style.configure('TLabel', background="#e8f0f8", font=('Segoe UI', 11))
+        self.style.configure('Header.TLabel', font=('Segoe UI', 18, 'bold'), foreground="#2c3e50")
+        self.style.configure('SubHeader.TLabel', font=('Segoe UI', 12, 'italic'), foreground="#7f8c8d")
+        
+        # Entry fields
+        self.style.configure('TEntry', fieldbackground='#ffffff', bordercolor='#cccccc', borderradius=5)
+
+        # Buttons with flat design and distinct colors
+        self.style.configure('TButton', font=('Segoe UI', 11, 'bold'), padding=8, relief='flat', borderwidth=0)
+        self.style.map('TButton',
+                       background=[('active', '#d0d0d0')],
+                       foreground=[('active', 'black')])
+
+        self.style.configure('Primary.TButton', foreground='white', background='#3498db')
+        self.style.map('Primary.TButton',
+                        background=[('pressed', '#2980b9'), ('active', '#2980b9')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+
+        self.style.configure('Success.TButton', foreground='white', background='#2ecc71')
+        self.style.map('Success.TButton',
+                        background=[('pressed', '#27ae60'), ('active', '#27ae60')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+
+        self.style.configure('Danger.TButton', foreground='white', background='#e74c3c')
+        self.style.map('Danger.TButton',
+                        background=[('pressed', '#c0392b'), ('active', '#c0392b')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+
+        self.style.configure('Info.TButton', foreground='white', background='#9b59b6')
+        self.style.map('Info.TButton',
+                        background=[('pressed', '#8e44ad'), ('active', '#8e44ad')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+        
+        # Treeview styling
+        self.style.configure('Treeview',
+                             background="#ffffff",
+                             foreground="#333333",
+                             rowheight=25,
+                             fieldbackground="#ffffff")
+        self.style.map('Treeview', background=[('selected', '#3498db')])
+        self.style.configure('Treeview.Heading',
+                             font=('Segoe UI', 10, 'bold'),
+                             background='#f0f0f0',
+                             foreground='#2c3e50',
+                             relief='raised')
+        
+        # Application data
+        self.all_data = []
+        self.current_student_index = 0
+        self.institution_name = "University of Excellence"
+        self.logo_path = None # Placeholder for a potential logo path
+        self.canvas_scroll_bind_id = None # To store canvas scroll binding ID for unbinding
+        self.scrollable_frame_id = None # To store the ID of the window item created on canvas
+
+        # Initialize UI
+        self.show_welcome_screen()
+        
+    def clear_window(self):
+        """Clears all widgets from the current window."""
+        # Unbind previous canvas scroll if it was set
+        if self.canvas_scroll_bind_id:
+            self.root.unbind("<MouseWheel>", self.canvas_scroll_bind_id)
+            self.canvas_scroll_bind_id = None
+            
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def show_welcome_screen(self):
+        """Displays the initial welcome screen with app features and navigation."""
+        self.clear_window()
+        
+        # Main container frame for welcome screen, centered
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(0, weight=1) # Allows content to expand
+        main_container.grid_columnconfigure(0, weight=1)
+
+        # Content frame for packing
+        content_frame = ttk.Frame(main_container, style='TFrame')
+        content_frame.pack(expand=True, fill='both', pady=20) # Allows content to center vertically
+
+        # Header
+        ttk.Label(content_frame, text="Academic Performance Analyzer", style='Header.TLabel').pack(pady=(10, 5))
+        ttk.Label(content_frame, text="Comprehensive GPA Calculation and Reporting System", 
+                  style='SubHeader.TLabel').pack(pady=(0, 20))
+        
+        # Logo placeholder
+        logo_placeholder = ttk.Frame(content_frame, height=120, width=120, relief='groove',
+                                     borderwidth=1, style='TFrame')
+        logo_placeholder.pack(pady=15)
+        ttk.Label(logo_placeholder, text="🎓", font=('Segoe UI', 48, 'bold'), foreground="#3498db", background="#e8f0f8").place(relx=0.5, rely=0.5, anchor='center')
+        
+        # Features list
+        ttk.Label(content_frame, text="Key Features:", font=('Segoe UI', 12, 'bold')).pack(anchor='center', pady=(15, 10))
+
+        features = [
+            "✓ Calculate GPA for individual students or groups",
+            "✓ Generate detailed PDF reports (individual and aggregate)",
+            "✓ Export data to CSV for further analysis (individual and aggregate)",
+            "✓ Professional grade reporting and visualization",
+            "✓ Customizable grading scales (future enhancement potential)",
+            "✓ User-friendly interface with clear navigation"
+        ]
+        
+        for feature in features:
+            ttk.Label(content_frame, text=feature, font=('Segoe UI', 11)).pack(anchor='center', pady=2, padx=10)
+        
+        # Button frame
+        button_frame = ttk.Frame(content_frame, padding="20 10")
+        button_frame.pack(pady=(30, 10))
+        
+        ttk.Button(button_frame, text="Get Started", style='Success.TButton', 
+                   command=self.reset_main_input).pack(side='left', padx=15)
+        ttk.Button(button_frame, text="Help", style='Info.TButton', 
+                   command=self.show_help).pack(side='left', padx=15)
+        ttk.Button(button_frame, text="Exit", style='Danger.TButton', 
+                   command=self.root.quit).pack(side='left', padx=15)
+        
+        # Footer
+        footer_frame = ttk.Frame(content_frame, padding="10 5")
+        footer_frame.pack(side='bottom', fill='x', pady=(20, 0)) # Ensure footer is at bottom of content frame
+        
+        ttk.Label(footer_frame, text=f"© {datetime.now().year} {self.institution_name} - Academic Tools Division", 
+                  font=('Segoe UI', 9, 'italic'), foreground="#95a5a6", anchor='center').pack(pady=5)
+    
+    def show_help(self):
+        """Displays a comprehensive help documentation window."""
+        help_window = tk.Toplevel(self.root)
+        help_window.title("Help Documentation")
+        help_window.geometry("750x550")
+        help_window.resizable(False, False)
+        help_window.transient(self.root) # Make it appear on top of the main window
+        help_window.grab_set() # Prevent interaction with main window until closed
+        
+        notebook = ttk.Notebook(help_window)
+        notebook.pack(fill='both', expand=True, padx=15, pady=15)
+        
+        # --- Quick Start Tab ---
+        quick_start = ttk.Frame(notebook, padding=10)
+        notebook.add(quick_start, text="Quick Start")
+        
+        quick_start_text = """
+        **Academic Performance Analyzer - Quick Start Guide**
+        
+        This application helps you calculate and report student GPAs efficiently.
+        
+        1.  **Enter Student Information:**
+            -   Click "Get Started" on the welcome screen.
+            -   Enter the student's full name and the total number of subjects they are taking.
+            -   Click "Next →" to proceed.
+        
+        2.  **Enter Subject Details:**
+            -   For each subject, enter its name (e.g., "Mathematics", "Physics") and the mark obtained (0-100).
+            -   Press `Enter` after each entry to quickly navigate to the next field.
+            -   Click "Submit Data" once all subjects are entered.
+        
+        3.  **View Results:**
+            -   The system will display a detailed report for the current student, including their overall GPA and individual subject GPAs.
+            -   Use "← Previous" and "Next →" to navigate between reports of multiple students if you've added more.
+        
+        4.  **Export Options:**
+            -   **Export to PDF:** Generates a professional PDF report for the currently displayed student.
+            -   **Export to CSV:** Saves the data for the current student to a CSV file.
+            -   **Export All to CSV:** Compiles all entered student data into a single, structured CSV report.
+            -   **Export All to PDF:** Creates a comprehensive PDF document with reports for all entered students.
+        
+        5.  **Add Another Student:**
+            -   Click "Add Another Student" from the results screen to input data for a new student.
+            -   Click "Back to Input" to return to the initial student information entry screen.
+        """
+        self._create_scrollable_text_tab(quick_start, quick_start_text, help_window)
+        
+        # --- Grading Scale Tab ---
+        grading_scale = ttk.Frame(notebook, padding=10)
+        notebook.add(grading_scale, text="Grading Scale")
+        
+        scale_info = """
+        **Standard GPA Grading Scale:**
+        
+        This application uses a standard 5.0 scale for GPA calculation.
+        
+        | Mark Range | Grade Points | Letter Grade |
+        | :--------- | :----------- | :----------- |
+        | 80-100     | 5.00         | A+           |
+        | 70-79      | 4.00         | A            |
+        | 60-69      | 3.50         | A-           |
+        | 50-59      | 3.00         | B            |
+        | 40-49      | 2.00         | C            |
+        | Below 40   | 0.00         | F (Fail)     |
+        
+        **Final GPA Calculation:**
+        The system calculates the average of all individual subject grade points to determine the overall GPA.
+        """
+        self._create_scrollable_text_tab(grading_scale, scale_info, help_window)
+        
+        # --- About Tab ---
+        about = ttk.Frame(notebook, padding=10)
+        notebook.add(about, text="About")
+        
+        about_info = f"""
+        **Academic Performance Analyzer**
+        
+        Version: 2.2.1 (Enhanced Edition)
+        Developed by: {self.institution_name} - Academic Tools Division
+        Release Date: {datetime.now().strftime('%B %Y')}
+        
+        **Purpose:**
+        This tool is designed to assist educational institutions and individuals in
+        accurately calculating and presenting academic performance metrics (GPA)
+        in a clear, professional, and easily digestible format.
+        
+        **Features Include:**
+        -   Intuitive data entry for student and subject details.
+        -   Automatic GPA calculation based on a predefined grading scale.
+        -   Generation of individual and aggregate PDF reports suitable for official records.
+        -   Flexible data export to CSV for further analysis or integration with other systems.
+        -   User-friendly interface with robust error handling.
+        
+        For technical support, feature requests, or collaboration inquiries, please contact:
+        academicsupport@{self.institution_name.lower().replace(' ', '')}.edu
+        """
+        self._create_scrollable_text_tab(about, about_info, help_window)
+        
+        # Close button
+        ttk.Button(help_window, text="Close Help", command=help_window.destroy, style='Primary.TButton').pack(pady=15)
+
+    def _create_scrollable_text_tab(self, parent_frame, text_content, top_level_window):
+        """Helper to create a scrollable text area for help tabs."""
+        text_widget = tk.Text(parent_frame, wrap='word', font=('Segoe UI', 10),
+                              bg="#ffffff", fg="#333333", relief='flat', padx=10, pady=10)
+        text_widget.insert('end', text_content)
+        text_widget.config(state='disabled') # Make it read-only
+        
+        scrollbar = ttk.Scrollbar(parent_frame, orient='vertical', command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        
+        text_widget.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        # Bind mouse wheel for scrolling the text widget in this Toplevel window
+        # Use a lambda to ensure the correct widget is scrolled
+        text_widget.bind("<MouseWheel>", lambda e: text_widget.yview_scroll(int(-1*(e.delta/120)), "units"))
+        parent_frame.bind("<MouseWheel>", lambda e: text_widget.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+
+    def reset_main_input(self):
+        """Resets and displays the main screen for entering student name and number of subjects."""
+        self.clear_window()
+        self.subject_entries = []
+        self.mark_entries = []
+        
+        # Main container frame for grid layout
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(1, weight=1) # Row for main input fields
+        main_container.grid_columnconfigure(0, weight=1)
+
+        # Header frame
+        header_frame = ttk.Frame(main_container, padding="0 0 0 10") # Removed top padding
+        header_frame.grid(row=0, column=0, sticky='ew', padx=20, pady=(20, 10))
+        
+        ttk.Label(header_frame, text="Student Information Entry", style='Header.TLabel').pack(side='left')
+        
+        # Back button
+        ttk.Button(header_frame, text="← Back to Welcome", style='Danger.TButton', 
+                   command=self.show_welcome_screen).pack(side='right', padx=(10,0))
+        
+        # Main content frame for input fields, within the grid
+        content_frame = ttk.Frame(main_container, padding="40")
+        content_frame.grid(row=1, column=0, sticky='nsew', padx=40, pady=10) # Fills available space
+        
+        # Form fields using grid for better alignment
+        content_frame.columnconfigure(1, weight=1) # Allow entry field to expand
+        
+        ttk.Label(content_frame, text="Student Name:", font=('Segoe UI', 12, 'bold')).grid(row=0, column=0, sticky='w', pady=(10, 15), padx=(0, 10))
+        self.name_entry = ttk.Entry(content_frame, width=40, font=('Segoe UI', 12))
+        self.name_entry.grid(row=0, column=1, sticky='ew', pady=(10, 15))
+        
+        ttk.Label(content_frame, text="Number of Subjects:", font=('Segoe UI', 12, 'bold')).grid(row=1, column=0, sticky='w', pady=(15, 15), padx=(0, 10))
+        self.num_entry = ttk.Entry(content_frame, width=40, font=('Segoe UI', 12))
+        self.num_entry.grid(row=1, column=1, sticky='ew', pady=(15, 15))
+        
+        # Button frame (also within content_frame for positioning)
+        button_frame = ttk.Frame(content_frame, padding="20 0")
+        button_frame.grid(row=2, column=0, columnspan=2, pady=(40, 10))
+        
+        ttk.Button(button_frame, text='Next →', style='Primary.TButton', 
+                   command=self.generate_student_inputs).pack(side='right', padx=10)
+        
+        # Status label for error messages
+        self.output_label = ttk.Label(content_frame, text='', foreground='#e74c3c', font=('Segoe UI', 10, 'italic'))
+        self.output_label.grid(row=3, column=0, columnspan=2, pady=(10, 0))
+        
+        # Set focus and bindings for quick input
+        self.name_entry.focus_set() # Use focus_set() for better practice
+        self.name_entry.bind('<Return>', lambda e: self.num_entry.focus_set())
+        self.num_entry.bind('<Return>', lambda e: self.generate_student_inputs())
+
+    def generate_student_inputs(self):
+        """Validates initial student input and generates subject/mark entry fields."""
+        name = self.name_entry.get().strip()
+        num_subjects_str = self.num_entry.get().strip()
+        
+        if not name:
+            self.output_label.config(text="Student Name cannot be empty.")
+            self.name_entry.focus_set()
+            return
+            
+        try:
+            num_subjects = int(num_subjects_str)
+            if num_subjects <= 0:
+                raise ValueError
+        except ValueError:
+            self.output_label.config(text="Number of subjects must be a positive integer.")
+            self.num_entry.focus_set()
+            return
+
+        self.student_name = name
+        self.num_subjects = num_subjects
+        
+        self.clear_window() # Clear previous widgets
+
+        # Main container frame for grid layout
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(1, weight=1) # Row for scrollable area
+        main_container.grid_columnconfigure(0, weight=1)
+
+        # Header frame
+        header_frame = ttk.Frame(main_container, padding="0 0 0 10")
+        header_frame.grid(row=0, column=0, sticky='ew', padx=20, pady=(20, 10))
+        
+        ttk.Label(header_frame, text=f"Entering Data for: {self.student_name}", style='Header.TLabel').pack(side='left')
+        
+        ttk.Button(header_frame, text="← Back to Student Info", style='Danger.TButton', 
+                   command=self.reset_main_input).pack(side='right', padx=(10,0))
+        
+        # Scrollable area for subject entries
+        self.canvas = tk.Canvas(main_container, bg="#e8f0f8", highlightthickness=0)
+        self.canvas.grid(row=1, column=0, sticky='nsew', padx=20, pady=10) # Fill available space
+        
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=self.canvas.yview)
+        scrollbar.grid(row=1, column=1, sticky='ns', pady=10) # Place scrollbar next to canvas
+        
+        scrollable_frame = ttk.Frame(self.canvas, padding="20")
+        
+        # Configure scrollable frame to expand with content
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        
+        # Store the ID returned by create_window
+        self.scrollable_frame_id = self.canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Update canvas window width on resize using the stored ID
+        # Removed the self.canvas.winfo_children()[0] and used the stored ID self.scrollable_frame_id
+        self.canvas.bind('<Configure>', 
+                         lambda e: self.canvas.itemconfig(self.scrollable_frame_id, width=self.canvas.winfo_width()))
+
+        # Bind mouse wheel for canvas scrolling, unbind previous if any
+        if self.canvas_scroll_bind_id:
+            self.root.unbind("<MouseWheel>", self.canvas_scroll_bind_id)
+        self.canvas_scroll_bind_id = self.root.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        self.subject_entries = []
+        self.mark_entries = []
+
+        # Subject entry form
+        for i in range(num_subjects):
+            subject_frame = ttk.Frame(scrollable_frame, padding="5 5")
+            subject_frame.pack(fill='x', pady=5)
+            
+            # Use grid within subject_frame for better alignment of subject/mark pairs
+            subject_frame.columnconfigure(1, weight=3) # Subject entry takes more space
+            subject_frame.columnconfigure(3, weight=1) # Mark entry takes less space
+
+            ttk.Label(subject_frame, text=f"Subject {i+1} Name:", font=('Segoe UI', 11, 'bold')).grid(row=0, column=0, sticky='w', padx=(0, 10))
+            sub_entry = ttk.Entry(subject_frame, font=('Segoe UI', 11))
+            sub_entry.grid(row=0, column=1, padx=(5, 15), sticky='ew')
+            
+            ttk.Label(subject_frame, text="Mark (0-100):", font=('Segoe UI', 11, 'bold')).grid(row=0, column=2, sticky='w', padx=(0, 10))
+            mark_entry = ttk.Entry(subject_frame, font=('Segoe UI', 11))
+            mark_entry.grid(row=0, column=3, sticky='ew')
+            
+            if i == 0: # Set focus on the first subject name
+                sub_entry.focus_set()
+            
+            self.subject_entries.append(sub_entry)
+            self.mark_entries.append(mark_entry)
+            
+            # Bind Enter key for sequential navigation
+            sub_entry.bind('<Return>', lambda e, m=mark_entry: m.focus_set())
+            if i < num_subjects - 1:
+                def focus_next(i=i):
+                    return lambda e: self.subject_entries[i+1].focus_set()
+                mark_entry.bind('<Return>', focus_next())
+            else: # Last mark entry, pressing Enter submits data
+                mark_entry.bind('<Return>', lambda e: self.store_student_data())
+        
+        # Button frame (outside scrollable frame, at bottom of main_container)
+        button_frame = ttk.Frame(main_container, padding="20 0")
+        button_frame.grid(row=2, column=0, columnspan=2, pady=(10, 20)) # Placed in separate row
+        
+        ttk.Button(button_frame, text='Submit Data', style='Success.TButton', 
+                   command=self.store_student_data).pack()
+        
+        # Status label for subject/mark input validation
+        self.output_label = ttk.Label(main_container, text='', foreground='#e74c3c', font=('Segoe UI', 10, 'italic'))
+        self.output_label.grid(row=3, column=0, columnspan=2, pady=(5, 10))
+
+    def store_student_data(self):
+        """Collects subject and mark data, calculates GPA, and stores it."""
+        subjects_data = []
+        
+        for i in range(self.num_subjects):
+            sub = self.subject_entries[i].get().strip()
+            mark_str = self.mark_entries[i].get().strip()
+            
+            if not sub:
+                self.output_label.config(text=f"Subject name for Subject {i+1} cannot be empty.")
+                self.subject_entries[i].focus_set()
+                return
+            
+            try:
+                mark = float(mark_str)
+                if not (0 <= mark <= 100):
+                    raise ValueError
+            except ValueError:
+                self.output_label.config(text=f"Invalid mark for '{sub}' (Subject {i+1}). Must be a number between 0 and 100.")
+                self.mark_entries[i].focus_set()
+                return
+                
+            subjects_data.append({"Subject Name": sub, "Mark": mark})
+        
+        # Calculate GPA for all subjects entered
+        marks_only = [s["Mark"] for s in subjects_data]
+        overall_gpa = self.calculate_gpa(marks_only)
+        
+        student_record = {
+            "Student Name": self.student_name,
+            "Entry Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Number of Subjects": self.num_subjects,
+            "GPA": overall_gpa,
+            "Subjects": []
+        }
+        
+        for sub_data in subjects_data:
+            subject_mark = sub_data["Mark"]
+            subject_gpa = self._mark_to_gpa(subject_mark)
+            student_record["Subjects"].append({
+                "Subject Name": sub_data["Subject Name"],
+                "Mark": subject_mark,
+                "Grade": self._get_letter_grade(subject_mark),
+                "Subject GPA": subject_gpa
+            })
+        
+        self.all_data.append(student_record)
+        self.current_student_index = len(self.all_data) - 1 # Set to the newly added student
+        self.show_student_result()
+
+    def show_student_result(self):
+        """Displays the calculated GPA results for the current student."""
+        self.clear_window()
+        if not self.all_data:
+            messagebox.showerror("No Data", "No student data available to display.")
+            self.reset_main_input()
+            return
+            
+        student_data = self.all_data[self.current_student_index]
+        
+        # Main container frame for grid layout
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(2, weight=1) # Row for main content (table)
+        main_container.grid_columnconfigure(0, weight=1)
+
+        # Header frame
+        header_frame = ttk.Frame(main_container, padding="0 0 0 10")
+        header_frame.grid(row=0, column=0, sticky='ew', padx=20, pady=(20, 10))
+        
+        ttk.Label(header_frame, text=f"Academic Results: {student_data['Student Name']}", style='Header.TLabel').pack(side='left')
+        
+        # Navigation buttons for multiple students
+        nav_frame = ttk.Frame(header_frame)
+        nav_frame.pack(side='right')
+        
+        if self.current_student_index > 0:
+            ttk.Button(nav_frame, text="← Previous Student", style='Primary.TButton', 
+                       command=self.show_previous_student).pack(side='left', padx=5)
+        
+        ttk.Button(nav_frame, text="Back to Input", style='Danger.TButton', 
+                   command=self.reset_main_input).pack(side='left', padx=5)
+        
+        if self.current_student_index < len(self.all_data) - 1:
+            ttk.Button(nav_frame, text="Next Student →", style='Primary.TButton', 
+                       command=self.show_next_student).pack(side='left', padx=5)
+                       
+        # Student info summary
+        info_frame = ttk.Frame(main_container, borderwidth=1, relief='solid', padding=15, style='TFrame')
+        info_frame.grid(row=1, column=0, sticky='ew', padx=20, pady=(0, 15))
+        
+        info_frame.columnconfigure(1, weight=1) # Allow second column to expand
+        info_frame.columnconfigure(3, weight=1) # Allow fourth column to expand
+
+        ttk.Label(info_frame, text="Student Name:", font=('Segoe UI', 12, 'bold')).grid(row=0, column=0, sticky='w', padx=(0, 10))
+        ttk.Label(info_frame, text=student_data['Student Name'], font=('Segoe UI', 12)).grid(row=0, column=1, sticky='w')
+        
+        ttk.Label(info_frame, text="Entry Date:", font=('Segoe UI', 11, 'bold')).grid(row=0, column=2, sticky='e', padx=(20, 10))
+        ttk.Label(info_frame, text=student_data['Entry Date'], font=('Segoe UI', 11)).grid(row=0, column=3, sticky='e')
+        
+        ttk.Label(info_frame, text="Number of Subjects:", font=('Segoe UI', 11, 'bold')).grid(row=1, column=0, sticky='w', pady=(5, 0), padx=(0, 10))
+        ttk.Label(info_frame, text=student_data['Number of Subjects'], font=('Segoe UI', 11)).grid(row=1, column=1, sticky='w', pady=(5, 0))
+        
+        # Results table using Treeview
+        table_frame = ttk.Frame(main_container)
+        table_frame.grid(row=2, column=0, sticky='nsew', padx=20, pady=5) # This row expands
+        
+        columns = ("Subject", "Mark", "Grade", "Subject GPA")
+        tree = ttk.Treeview(table_frame, columns=columns, show='headings', selectmode='browse')
+        
+        tree.heading("Subject", text="Subject", anchor='w')
+        tree.heading("Mark", text="Mark", anchor='center')
+        tree.heading("Grade", text="Grade", anchor='center')
+        tree.heading("Subject GPA", text="Subject GPA", anchor='center')
+        
+        tree.column("Subject", width=250, anchor='w')
+        tree.column("Mark", width=100, anchor='center')
+        tree.column("Grade", width=100, anchor='center')
+        tree.column("Subject GPA", width=120, anchor='center') # Slightly wider for GPA
+        
+        for subject_data in student_data["Subjects"]:
+            tree.insert("", "end", values=(
+                subject_data["Subject Name"],
+                f"{subject_data['Mark']:.2f}",
+                subject_data["Grade"],
+                f"{subject_data['Subject GPA']:.2f}"
+            ))
+        
+        tree.pack(side="left", fill="both", expand=True)
+        
+        tree_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree_scrollbar.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=tree_scrollbar.set)
+        
+        # Overall GPA display with emphasis
+        overall_gpa_frame = ttk.Frame(main_container, borderwidth=1, relief='groove', padding=15, style='TFrame')
+        overall_gpa_frame.grid(row=3, column=0, sticky='ew', padx=20, pady=(15, 10))
+        
+        ttk.Label(overall_gpa_frame, text="Overall GPA:",
+                  font=('Segoe UI', 16, 'bold'), foreground="#2c3e50").pack(side='left', padx=(0, 10))
+        ttk.Label(overall_gpa_frame, text=f"{student_data['GPA']:.2f}",
+                  font=('Segoe UI', 18, 'bold'), foreground="#3498db").pack(side='left') # Highlight GPA
+        
+        # Export buttons
+        export_button_frame = ttk.Frame(main_container, padding="10 0")
+        export_button_frame.grid(row=4, column=0, sticky='ew', padx=20, pady=(10, 20))
+        # Use grid for buttons to ensure proper spacing and centering within the frame
+        export_button_frame.columnconfigure(0, weight=1) 
+        export_button_frame.columnconfigure(1, weight=1)
+        export_button_frame.columnconfigure(2, weight=1)
+        export_button_frame.columnconfigure(3, weight=1)
+        export_button_frame.columnconfigure(4, weight=1)
+
+        ttk.Button(export_button_frame, text="Export Single PDF", style='Info.TButton',
+                   command=lambda: self.export_to_pdf(student_data)).grid(row=0, column=0, padx=7, sticky='e')
+        ttk.Button(export_button_frame, text="Export Single CSV", style='Info.TButton',
+                   command=lambda: self.export_to_csv(student_data)).grid(row=0, column=1, padx=7, sticky='w')
+        ttk.Button(export_button_frame, text="Export All to CSV", style='Primary.TButton',
+                   command=self.export_all_to_csv).grid(row=0, column=2, padx=7)
+        ttk.Button(export_button_frame, text="Export All to PDF", style='Primary.TButton',
+                   command=self.export_all_to_pdf).grid(row=0, column=3, padx=7)
+
+        ttk.Button(export_button_frame, text="Add Another Student", style='Success.TButton',
+                   command=self.ask_add_another_student).grid(row=0, column=4, padx=7, sticky='w')
+
+
+    def ask_add_another_student(self):
+        """Asks the user if they want to add another student."""
+        if messagebox.askyesno("Add Another Student?", 
+                               "Would you like to enter data for another student?"):
+            self.reset_main_input()
+        else:
+            messagebox.showinfo("Operation Complete", "You can continue to use the application to view previous reports or close it.")
+
+
+    def show_previous_student(self):
+        """Navigates to the previous student's results."""
+        if self.current_student_index > 0:
+            self.current_student_index -= 1
+            self.show_student_result()
+        else:
+            messagebox.showinfo("End of List", "You are at the first student's report.")
+
+    def show_next_student(self):
+        """Navigates to the next student's results."""
+        if self.current_student_index < len(self.all_data) - 1:
+            self.current_student_index += 1
+            self.show_student_result()
+        else:
+            messagebox.showinfo("End of List", "You are at the last student's report.")
+
+    def calculate_gpa(self, marks):
+        """Calculates the overall GPA from a list of marks."""
+        total_gpa_points = sum(self._mark_to_gpa(mark) for mark in marks)
+        return total_gpa_points / len(marks) if marks else 0
+
+    def _mark_to_gpa(self, mark):
+        """Converts a numerical mark to GPA points based on a predefined scale."""
+        if 80 <= mark <= 100:
+            return 5.00
+        elif 70 <= mark <= 79:
+            return 4.00
+        elif 60 <= mark <= 69:
+            return 3.50
+        elif 50 <= mark <= 59:
+            return 3.00
+        elif 40 <= mark <= 49:
+            return 2.00
+        else:
+            return 0.00
+
+    def _get_letter_grade(self, mark):
+        """Converts a numerical mark to a letter grade."""
+        if 80 <= mark <= 100:
+            return "A+"
+        elif 70 <= mark <= 79:
+            return "A"
+        elif 60 <= mark <= 69:
+            return "A-"
+        elif 50 <= mark <= 59:
+            return "B"
+        elif 40 <= mark <= 49:
+            return "C"
+        else:
+            return "F"
+            
+    def export_to_pdf(self, student_data):
+        """Exports a single student's GPA report to a PDF file."""
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+            initialfile=f"{student_data['Student Name'].replace(' ', '_')}_GPA_Report.pdf",
+            title=f"Save {student_data['Student Name']}'s GPA Report"
+        )
+        if not file_path:
+            return
+
+        try:
+            doc = canvas.Canvas(file_path, pagesize=landscape(letter))
+            width, height = landscape(letter)
+            styles = getSampleStyleSheet()
+
+            # Header
+            doc.setFont("Helvetica-Bold", 18)
+            doc.drawString(50, height - 50, f"{self.institution_name} - Academic Performance Report")
+            doc.setFont("Helvetica", 12)
+            doc.drawString(50, height - 70, "Comprehensive Student GPA Analysis")
+
+            # Student Info
+            y_pos = height - 120
+            doc.setFont("Helvetica-Bold", 14)
+            doc.drawString(50, y_pos, f"Student Name: {student_data['Student Name']}")
+            doc.setFont("Helvetica", 10)
+            doc.drawString(50, y_pos - 20, f"Entry Date: {student_data['Entry Date']}")
+            doc.drawString(50, y_pos - 40, f"Number of Subjects: {student_data['Number of Subjects']}")
+            
+            # Subject Data Table
+            data = [["Subject", "Mark", "Grade", "Subject GPA"]]
+            for subject in student_data["Subjects"]:
+                data.append([
+                    subject["Subject Name"],
+                    f"{subject['Mark']:.2f}",
+                    subject["Grade"],
+                    f"{subject['Subject GPA']:.2f}"
+                ])
+
+            table = Table(data, colWidths=[200, 80, 80, 100]) # Adjusted column widths for landscape
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ADD8E6')), # Light blue header
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'), # Left align subject names
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F0F8FF')), # AliceBlue for data rows
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey), # Lighter grid lines
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ]))
+
+            # Calculate table height and draw it
+            table_height = table.wrapOn(doc, width, height)[1]
+            table.drawOn(doc, 50, y_pos - 60 - table_height)
+
+            # Overall GPA
+            gpa_y_pos = y_pos - 60 - table_height - 40 # More space below table
+            doc.setFont("Helvetica-Bold", 16)
+            doc.setFillColor(colors.darkblue) # Change GPA color
+            doc.drawString(50, gpa_y_pos, f"Overall GPA: {student_data['GPA']:.2f}")
+
+            # Disclaimer/Footer
+            doc.setFont("Helvetica-Oblique", 9)
+            doc.setFillColor(colors.black)
+            doc.drawString(50, 50, "This report is generated by the Academic Performance Analyzer.")
+            doc.drawString(50, 35, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            doc.save()
+            messagebox.showinfo("Export Successful", f"PDF report saved to:\n{file_path}")
+            webbrowser.open(file_path) # Open the PDF automatically
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export PDF: {e}")
+
+    def export_to_csv(self, student_data):
+        """Exports a single student's GPA data to a CSV file."""
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile=f"{student_data['Student Name'].replace(' ', '_')}_Data.csv",
+            title=f"Save {student_data['Student Name']}'s GPA Data"
+        )
+        if not file_path:
+            return
+
+        try:
+            # Create a DataFrame for subject details
+            df_subjects = pd.DataFrame(student_data["Subjects"])
+            
+            # Create a DataFrame for general student info
+            student_info_df = pd.DataFrame({
+                "Student Name": [student_data['Student Name']],
+                "Entry Date": [student_data['Entry Date']],
+                "Number of Subjects": [student_data['Number of Subjects']],
+                "Overall GPA": [f"{student_data['GPA']:.2f}"]
+            })
+
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                f.write("--- Student General Information ---\n")
+                student_info_df.to_csv(f, index=False)
+                f.write("\n--- Subject Details ---\n")
+                df_subjects.to_csv(f, index=False)
+                f.write("\n") # Add a blank line at the end
+
+            messagebox.showinfo("Export Successful", f"CSV data saved to:\n{file_path}")
+            webbrowser.open(os.path.dirname(file_path)) # Open the directory
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
+
+    def export_all_to_csv(self):
+        """Exports all recorded student GPA data to a single structured CSV file."""
+        if not self.all_data:
+            messagebox.showinfo("No Data", "No student data to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="All_Students_GPA_Report.csv",
+            title="Save All Student GPA Data"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                # Write a general header for the entire file
+                f.write(f"Academic Performance Analyzer - All Students Report\n")
+                f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                # Define the detailed header for the combined data, only once at the top
+                f.write("Student Name,Entry Date,Overall GPA,Subject Name,Mark,Grade,Subject GPA\n")
+                
+                for student in self.all_data:
+                    student_name = f'"{student["Student Name"]}"' # Enclose in quotes for CSV
+                    entry_date = f'"{student["Entry Date"]}"'
+                    overall_gpa = f'"{student["GPA"]:.2f}"'
+                    
+                    for i, subject in enumerate(student["Subjects"]):
+                        subject_name = f'"{subject["Subject Name"]}"'
+                        mark = f'"{subject["Mark"]:.2f}"'
+                        grade = f'"{subject["Grade"]}"'
+                        subject_gpa = f'"{subject["Subject GPA"]:.2f}"'
+                        
+                        if i == 0: # First subject for this student, include all student details
+                            f.write(f"{student_name},{entry_date},{overall_gpa},")
+                        else: # Subsequent subjects for the same student, leave general info columns empty
+                            f.write(",,,") # Keep the number of commas consistent
+                            
+                        f.write(f"{subject_name},{mark},{grade},{subject_gpa}\n")
+                    f.write("\n") # Add a blank line after each student's data for clear separation
+
+            messagebox.showinfo("Export Successful", f"All student data saved to:\n{file_path}")
+            webbrowser.open(os.path.dirname(file_path)) # Open the directory
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export all data to CSV: {e}")
+
+    def export_all_to_pdf(self):
+        """Exports all recorded student GPA reports into a single PDF file, with each student on a new page."""
+        if not self.all_data:
+            messagebox.showinfo("No Data", "No student data to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+            initialfile="All_Students_GPA_Reports.pdf",
+            title="Save All Students' GPA Report"
+        )
+        if not file_path:
+            return
+
+        try:
+            doc = canvas.Canvas(file_path, pagesize=landscape(letter))
+            width, height = landscape(letter)
+            styles = getSampleStyleSheet()
+
+            for student_index, student_data in enumerate(self.all_data):
+                if student_index > 0:
+                    doc.showPage() # Start a new page for each student after the first one
+
+                # Title for the combined report or specific student page
+                doc.setFont("Helvetica-Bold", 18)
+                doc.drawCentredString(width / 2.0, height - 50, f"{self.institution_name} - Aggregate Academic Report")
+                doc.setFont("Helvetica", 12)
+                doc.drawCentredString(width / 2.0, height - 70, f"Detailed Report for: {student_data['Student Name']}")
+
+                # Student Info Section
+                y_pos = height - 120
+                doc.setFont("Helvetica-Bold", 14)
+                doc.drawString(50, y_pos, f"Student Name: {student_data['Student Name']}")
+                
+                doc.setFont("Helvetica", 10)
+                doc.drawString(50, y_pos - 20, f"Entry Date: {student_data['Entry Date']}")
+                doc.drawString(width / 2.0 + 50, y_pos - 20, f"Number of Subjects: {student_data['Number of Subjects']}") # Placed to the right
+
+                # Subject Data Table
+                data = [["Subject", "Mark", "Grade", "Subject GPA"]]
+                for subject in student_data["Subjects"]:
+                    data.append([
+                        subject["Subject Name"],
+                        f"{subject['Mark']:.2f}",
+                        subject["Grade"],
+                        f"{subject['Subject GPA']:.2f}"
+                    ])
+
+                # Define table style
+                table = Table(data, colWidths=[200, 80, 80, 100]) # Adjusted widths
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ADD8E6')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('ALIGN', (0, 0), (0, -1), 'LEFT'), # Left align subject names
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F0F8FF')),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                    ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                    ('TOPPADDING', (0, 0), (-1, -1), 6),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ]))
+
+                # Calculate table height and draw it
+                table_height = table.wrapOn(doc, width, height)[1]
+                table.drawOn(doc, 50, y_pos - 60 - table_height)
+
+                # Overall GPA
+                gpa_y_pos = y_pos - 60 - table_height - 40
+                doc.setFont("Helvetica-Bold", 16)
+                doc.setFillColor(colors.darkblue)
+                doc.drawString(50, gpa_y_pos, f"Overall GPA: {student_data['GPA']:.2f}")
+
+                # Footer for each page
+                doc.setFont("Helvetica-Oblique", 9)
+                doc.setFillColor(colors.black)
+                doc.drawString(50, 50, "This report is generated by the Academic Performance Analyzer.")
+                doc.drawString(50, 35, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            doc.save()
+            messagebox.showinfo("Export Successful", f"All student reports combined into a single PDF saved to:\n{file_path}")
+            webbrowser.open(file_path) # Open the PDF automatically
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export all data to PDF: {e}")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ProfessionalGPAApp(root)
+    root.mainloop()
