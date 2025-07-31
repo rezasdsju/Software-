@@ -1,0 +1,2705 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import pandas as pd
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, PageBreak, Image as RLImage
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+import webbrowser
+import os
+from datetime import datetime
+import json
+import sqlite3
+import numpy as np
+import logging # For enhanced logging
+import sys # To capture unhandled exceptions
+
+# Try to import matplotlib. If not available, plotting features will be disabled gracefully.
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    import io
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    print("Matplotlib not found. PDF charting features will be disabled.")
+
+# --- Constants for consistent styling and paths ---
+# Paths
+APP_ICON_FILENAME = 'gpa_icon.ico'
+DB_FILENAME = 'gpa_data.db'
+SETTINGS_FILENAME = 'app_settings.json' # For application-level settings
+LOG_FILENAME = 'gpa_app.log'
+
+# Colors (Enhanced Theme)
+BG_COLOR = "#f5f7fa"        # Light background
+HEADER_COLOR = "#2c3e50"    # Dark navy for headers
+SUBHEADER_COLOR = "#7f8c8d" # Muted grey for subheaders
+PRIMARY_BUTTON_COLOR = "#3498db" # Blue
+SUCCESS_BUTTON_COLOR = "#27ae60" # Green
+DANGER_BUTTON_COLOR = "#e74c3c"  # Red
+INFO_BUTTON_COLOR = "#8e44ad"    # Purple
+TEXT_COLOR = "#333333"      # Dark grey for general text
+ERROR_COLOR = "#e74c3c"     # Red for errors
+HIGHLIGHT_COLOR = "#3498db" # Blue for highlights
+TABLE_HEADER_BG = colors.HexColor('#e0f2f7') # Light blue for table headers
+TABLE_ROW_BG_ODD = colors.HexColor('#ffffff') # White for odd rows
+TABLE_ROW_BG_EVEN = colors.HexColor('#f8f9fa') # Very light grey for even rows
+TABLE_GRID_COLOR = colors.HexColor('#dee2e6') # Light grey for grid lines
+
+# Fonts
+FONT_FAMILY = 'Segoe UI' if sys.platform == 'win32' else 'Helvetica'
+HEADER_FONT_SIZE = 22
+SUBHEADER_FONT_SIZE = 14
+NORMAL_FONT_SIZE = 11
+SMALL_FONT_SIZE = 9
+GPA_FONT_SIZE = 20
+BUTTON_FONT_SIZE = 11
+
+# Logging Configuration
+logging.basicConfig(filename=LOG_FILENAME, level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# --- Global Exception Handler (for unhandled errors) ---
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logging.critical("Unhandled exception caught!", exc_info=(exc_type, exc_value, exc_traceback))
+    messagebox.showerror("Critical Error", "An unexpected error occurred. Please check the application log for details.")
+
+sys.excepthook = handle_exception
+
+# --- Tooltip Class ---
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        self.id = None
+        self.x = 0
+        self.y = 0
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<ButtonPress>", self.leave)
+
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hide_tip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(500, self.show_tip) # Show after 500ms
+
+    def unschedule(self):
+        if self.id:
+            self.widget.after_cancel(self.id)
+            self.id = None
+
+    def show_tip(self):
+        if self.tip_window or not self.text:
+            return
+        x, y, cx, cy = self.widget.bbox("insert")
+        x = x + self.widget.winfo_rootx() + 25 # Offset to the right
+        y = y + cy + self.widget.winfo_rooty() + 25 # Offset below
+        
+        self.tip_window = tk.Toplevel(self.widget)
+        self.tip_window.wm_overrideredirect(True) # Remove window decorations
+        self.tip_window.wm_geometry(f"+{x}+{y}")
+        
+        label = ttk.Label(self.tip_window, text=self.text, background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                          font=(FONT_FAMILY, 9), wraplength=250) # Wrap text
+        label.pack(ipadx=1)
+
+    def hide_tip(self):
+        if self.tip_window:
+            self.tip_window.destroy()
+        self.tip_window = None
+
+# --- Database Manager Class ---
+class DatabaseManager:
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self._create_tables()
+
+    def _get_connection(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row # Allows accessing columns by name
+            logging.debug(f"Connected to database: {self.db_path}")
+            return conn
+        except sqlite3.Error as e:
+            logging.error(f"Database connection error: {e}", exc_info=True)
+            raise
+
+    def _create_tables(self):
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS students (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE, -- Student names must be unique
+                    entry_date TEXT NOT NULL,
+                    cumulative_gpa REAL DEFAULT 0.0,
+                    num_subjects INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS subjects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    mark REAL NOT NULL,
+                    credits INTEGER DEFAULT 0,
+                    semester TEXT,
+                    grade TEXT,
+                    subject_gpa REAL,
+                    UNIQUE(student_id, name, semester), -- Prevent duplicate subjects per student per semester
+                    FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS grading_scales (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    rules TEXT NOT NULL -- JSON string of rules
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            ''')
+            conn.commit()
+            conn.close()
+            logging.info("Database tables ensured.")
+            self._add_default_grading_scale()
+            self._initialize_app_settings()
+        except sqlite3.Error as e:
+            logging.critical(f"Failed to create database tables: {e}", exc_info=True)
+            raise
+
+    def _add_default_grading_scale(self):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        default_scale_name = "Standard 5.0 Scale"
+        default_rules = {
+            "80-100": 5.00,
+            "70-79": 4.00,
+            "60-69": 3.50,
+            "50-59": 3.00,
+            "40-49": 2.00,
+            "0-39": 0.00
+        }
+        try:
+            cursor.execute("INSERT INTO grading_scales (name, rules) VALUES (?, ?)",
+                           (default_scale_name, json.dumps(default_rules)))
+            conn.commit()
+            logging.info("Default grading scale added.")
+        except sqlite3.IntegrityError:
+            logging.info("Default grading scale already exists, skipping addition.")
+        except sqlite3.Error as e:
+            logging.error(f"Error adding default grading scale: {e}", exc_info=True)
+        finally:
+            conn.close()
+
+    def _initialize_app_settings(self):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        settings = {
+            "institution_name": "University of Excellence",
+            "logo_path": "",
+            "active_grading_scale_id": "" # Will be set to first scale's ID later
+        }
+        for key, value in settings.items():
+            cursor.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
+        
+        # Ensure an active grading scale is set
+        scales = self.get_grading_scales()
+        if scales and not self.get_setting("active_grading_scale_id"):
+            self.update_setting("active_grading_scale_id", scales[0]['id'])
+            logging.info(f"Set initial active grading scale to: {scales[0]['name']}")
+
+        conn.close()
+        logging.info("Application settings initialized.")
+
+    def get_setting(self, key):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+        result = cursor.fetchone()
+        conn.close()
+        return result['value'] if result else None
+
+    def update_setting(self, key, value):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
+        conn.close()
+        logging.info(f"Setting updated: {key} = {value}")
+
+    def add_student(self, name, entry_date):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO students (name, entry_date) VALUES (?, ?)", (name, entry_date))
+            student_id = cursor.lastrowid
+            conn.commit()
+            logging.info(f"Student added: {name} (ID: {student_id})")
+            return student_id
+        except sqlite3.IntegrityError:
+            logging.warning(f"Attempted to add duplicate student name: {name}")
+            return -1 # Indicate duplicate
+        except sqlite3.Error as e:
+            logging.error(f"Error adding student {name}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def update_student_name(self, student_id, new_name):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE students SET name = ? WHERE id = ?", (new_name, student_id))
+            conn.commit()
+            logging.info(f"Student ID {student_id} name updated to {new_name}")
+        except sqlite3.IntegrityError:
+            logging.warning(f"Attempted to update student ID {student_id} to duplicate name: {new_name}")
+            return False # Indicate duplicate name
+        except sqlite3.Error as e:
+            logging.error(f"Error updating student name for ID {student_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+        return True
+
+    def update_student_gpa_info(self, student_id, cumulative_gpa, num_subjects):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE students SET cumulative_gpa = ?, num_subjects = ? WHERE id = ?",
+                           (cumulative_gpa, num_subjects, student_id))
+            conn.commit()
+            logging.info(f"Student ID {student_id} GPA info updated.")
+        except sqlite3.Error as e:
+            logging.error(f"Error updating student GPA info for ID {student_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def get_students(self, search_query="", order_by="name ASC"):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        query = "SELECT id, name, entry_date, cumulative_gpa, num_subjects FROM students"
+        params = []
+        if search_query:
+            query += " WHERE name LIKE ?"
+            params.append(f"%{search_query}%")
+        query += f" ORDER BY {order_by}"
+        cursor.execute(query, params)
+        students = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        logging.debug(f"Fetched {len(students)} students with query '{search_query}'.")
+        return students
+
+    def get_student_details(self, student_id):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM students WHERE id = ?", (student_id,))
+        student = cursor.fetchone()
+        if student:
+            student_dict = dict(student)
+            cursor.execute("SELECT * FROM subjects WHERE student_id = ? ORDER BY semester, name", (student_id,))
+            student_dict['Subjects'] = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+            logging.debug(f"Fetched details for student ID: {student_id}")
+            return student_dict
+        conn.close()
+        logging.warning(f"Student details not found for ID: {student_id}")
+        return None
+
+    def delete_student(self, student_id):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM students WHERE id = ?", (student_id,))
+            conn.commit()
+            logging.info(f"Student ID {student_id} deleted successfully.")
+        except sqlite3.Error as e:
+            logging.error(f"Error deleting student ID {student_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def add_subject(self, student_id, name, mark, credits, semester, grade, subject_gpa):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO subjects (student_id, name, mark, credits, semester, grade, subject_gpa) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (student_id, name, mark, credits, semester, grade, subject_gpa))
+            conn.commit()
+            logging.debug(f"Subject '{name}' added for student ID {student_id}.")
+        except sqlite3.IntegrityError:
+            logging.warning(f"Attempted to add duplicate subject '{name}' for student ID {student_id} in semester {semester}.")
+            return False # Indicate duplicate
+        except sqlite3.Error as e:
+            logging.error(f"Error adding subject '{name}' for student ID {student_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+        return True
+
+    def update_subject(self, subject_id, name, mark, credits, semester, grade, subject_gpa):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE subjects SET name = ?, mark = ?, credits = ?, semester = ?, grade = ?, subject_gpa = ? WHERE id = ?",
+                           (name, mark, credits, semester, grade, subject_gpa, subject_id))
+            conn.commit()
+            logging.debug(f"Subject ID {subject_id} updated.")
+        except sqlite3.IntegrityError:
+            logging.warning(f"Attempted to update subject ID {subject_id} resulting in duplicate subject/semester for student.")
+            return False # Indicate duplicate
+        except sqlite3.Error as e:
+            logging.error(f"Error updating subject ID {subject_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+        return True
+
+    def delete_subject(self, subject_id):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
+            conn.commit()
+            logging.debug(f"Subject ID {subject_id} deleted.")
+        except sqlite3.Error as e:
+            logging.error(f"Error deleting subject ID {subject_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def delete_subjects_for_student(self, student_id):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM subjects WHERE student_id = ?", (student_id,))
+            conn.commit()
+            logging.info(f"All subjects for student ID {student_id} deleted.")
+        except sqlite3.Error as e:
+            logging.error(f"Error deleting subjects for student ID {student_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def get_grading_scales(self):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, rules FROM grading_scales")
+        scales = []
+        for row in cursor.fetchall():
+            scale_dict = dict(row)
+            try:
+                scale_dict['rules'] = json.loads(scale_dict['rules'])
+            except json.JSONDecodeError:
+                logging.error(f"Invalid JSON rules for grading scale ID {scale_dict['id']}: {scale_dict['rules']}", exc_info=True)
+                scale_dict['rules'] = {} # Fallback to empty rules
+            scales.append(scale_dict)
+        conn.close()
+        logging.debug(f"Fetched {len(scales)} grading scales.")
+        return scales
+
+    def add_grading_scale(self, name, rules):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO grading_scales (name, rules) VALUES (?, ?)",
+                           (name, json.dumps(rules)))
+            conn.commit()
+            logging.info(f"Grading scale '{name}' added.")
+            return True
+        except sqlite3.IntegrityError:
+            logging.warning(f"Attempted to add duplicate grading scale name: {name}")
+            return False # Name already exists
+        except sqlite3.Error as e:
+            logging.error(f"Error adding grading scale '{name}': {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def update_grading_scale(self, scale_id, name, rules):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE grading_scales SET name = ?, rules = ? WHERE id = ?",
+                           (name, json.dumps(rules), scale_id))
+            conn.commit()
+            logging.info(f"Grading scale ID {scale_id} updated to '{name}'.")
+            return True
+        except sqlite3.IntegrityError:
+            logging.warning(f"Attempted to update grading scale ID {scale_id} to duplicate name: {name}")
+            return False # Name already exists for another scale
+        except sqlite3.Error as e:
+            logging.error(f"Error updating grading scale ID {scale_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def delete_grading_scale(self, scale_id):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM grading_scales WHERE id = ?", (scale_id,))
+            conn.commit()
+            logging.info(f"Grading scale ID {scale_id} deleted.")
+        except sqlite3.Error as e:
+            logging.error(f"Error deleting grading scale ID {scale_id}: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+# --- GPA Calculation Logic (Moved to a separate class/module for modularity) ---
+class GPACalculator:
+    def __init__(self, db_manager):
+        self.db = db_manager
+        self.active_scale_id = self.db.get_setting("active_grading_scale_id")
+        self.active_grading_scale = self._load_active_grading_scale()
+        logging.info(f"GPA Calculator initialized with active scale ID: {self.active_scale_id}")
+        
+    def _load_active_grading_scale(self):
+        scales = self.db.get_grading_scales()
+        if not scales:
+            logging.warning("No grading scales defined in the database.")
+            return None # No scales defined
+        
+        # Try to find the active scale by ID, otherwise default to the first one
+        for scale in scales:
+            if str(scale['id']) == str(self.active_scale_id):
+                logging.debug(f"Active grading scale loaded: {scale['name']}")
+                return scale
+        
+        # If active_scale_id is not found or not set, use the first available scale
+        if scales:
+            self.active_scale_id = scales[0]['id']
+            self.db.update_setting("active_grading_scale_id", self.active_scale_id)
+            logging.warning(f"Active grading scale ID not found, defaulted to: {scales[0]['name']}")
+            return scales[0]
+        logging.error("No grading scales found after attempting to load active scale.")
+        return None # Should not happen if _add_default_grading_scale runs
+
+    def update_active_scale(self, scale_id):
+        self.active_scale_id = scale_id
+        self.db.update_setting("active_grading_scale_id", scale_id)
+        self.active_grading_scale = self._load_active_grading_scale()
+        logging.info(f"Active grading scale updated to ID: {scale_id}")
+
+    def get_gpa_from_mark(self, mark):
+        if not self.active_grading_scale:
+            logging.warning("No active grading scale set. Using default 5.0 scale for GPA calculation.")
+            return self._default_mark_to_gpa(mark)
+
+        rules = self.active_grading_scale['rules']
+        for range_str, gpa_value in rules.items():
+            try:
+                if '-' in range_str:
+                    low, high = map(int, range_str.split('-'))
+                    if low <= mark <= high:
+                        return float(gpa_value)
+                elif '<=' in range_str: # e.g., "<=39"
+                    threshold = int(range_str.replace('<=', ''))
+                    if mark <= threshold:
+                        return float(gpa_value)
+                elif '>=' in range_str: # e.g., ">=80"
+                    threshold = int(range_str.replace('>=', ''))
+                    if mark >= threshold:
+                        return float(gpa_value)
+                elif '<' in range_str: # e.g., "<40"
+                    threshold = int(range_str.replace('<', ''))
+                    if mark < threshold:
+                        return float(gpa_value)
+                elif '>' in range_str: # e.g., ">80"
+                    threshold = int(range_str.replace('>', ''))
+                    if mark > threshold:
+                        return float(gpa_value)
+                elif str(mark) == range_str: # Exact match for a single mark
+                    return float(gpa_value)
+            except ValueError:
+                logging.warning(f"Invalid rule format in grading scale '{self.active_grading_scale['name']}': {range_str}", exc_info=True)
+                continue
+        logging.warning(f"Mark {mark} not covered by any rule in active grading scale '{self.active_grading_scale['name']}'. Returning 0.00.")
+        return 0.00 # Default for marks not covered
+
+    def _default_mark_to_gpa(self, mark):
+        """Hardcoded fallback GPA conversion (Standard 5.0)."""
+        if 80 <= mark <= 100: return 5.00
+        elif 70 <= mark <= 79: return 4.00
+        elif 60 <= mark <= 69: return 3.50
+        elif 50 <= mark <= 59: return 3.00
+        elif 40 <= mark <= 49: return 2.00
+        else: return 0.00
+
+    def get_letter_grade(self, mark):
+        """Converts a numerical mark to a letter grade based on a fixed logic (could be configurable)."""
+        # This can be made configurable in the future, possibly part of grading scale rules.
+        if 80 <= mark <= 100: return "A+"
+        elif 70 <= mark <= 79: return "A"
+        elif 60 <= mark <= 69: return "A-"
+        elif 50 <= mark <= 59: return "B"
+        elif 40 <= mark <= 49: return "C"
+        else: return "F"
+
+    def calculate_overall_gpa(self, subjects_data):
+        """Calculates overall GPA, weighted by credits if credits > 0."""
+        if not subjects_data:
+            return 0.0
+        
+        total_gpa_points = 0.0
+        total_credits = 0.0
+        
+        for sub in subjects_data:
+            # Ensure Mark and Credits are present and valid
+            if 'mark' not in sub or 'credits' not in sub:
+                logging.error(f"Subject data missing 'mark' or 'credits' key: {sub}")
+                continue
+            
+            try:
+                gpa = self.get_gpa_from_mark(float(sub['mark']))
+                credits = int(sub['credits'])
+            except (ValueError, TypeError) as e:
+                logging.error(f"Invalid mark or credits value in subject data: {sub}. Error: {e}", exc_info=True)
+                continue # Skip invalid subject
+
+            if credits > 0:
+                total_gpa_points += gpa * credits
+                total_credits += credits
+            else: # If credits are 0 or not used, treat as unweighted for this subject
+                total_gpa_points += gpa
+                total_credits += 1 # Count as 1 unit for averaging if unweighted
+                
+        if total_credits > 0:
+            return total_gpa_points / total_credits
+        else:
+            return 0.0
+
+    def calculate_semester_gpa(self, subjects_data):
+        """Calculates GPA for each semester."""
+        semesters_gpa_data = {}
+        for sub in subjects_data:
+            semester = sub.get('semester', 'Unassigned').strip()
+            if not semester: # Treat empty string as 'Unassigned'
+                semester = 'Unassigned'
+
+            if semester not in semesters_gpa_data:
+                semesters_gpa_data[semester] = {'marks': [], 'credits': []}
+            
+            try:
+                semesters_gpa_data[semester]['marks'].append(float(sub['mark']))
+                semesters_gpa_data[semester]['credits'].append(int(sub['credits']))
+            except (ValueError, TypeError) as e:
+                logging.error(f"Invalid mark or credits for semester subject: {sub}. Error: {e}", exc_info=True)
+                continue
+
+        results = {}
+        for semester, data in semesters_gpa_data.items():
+            temp_subjects = [{'mark': m, 'credits': c} for m, c in zip(data['marks'], data['credits'])]
+            results[semester] = self.calculate_overall_gpa(temp_subjects)
+        logging.debug(f"Calculated semester GPAs: {results}")
+        return results
+
+# --- Report Generator Class ---
+class ReportGenerator:
+    def __init__(self, db_manager, gpa_calculator):
+        self.db = db_manager
+        self.gpa_calc = gpa_calculator
+        self.styles = getSampleStyleSheet()
+        self.institution_name = self.db.get_setting("institution_name")
+        self.logo_path = self.db.get_setting("logo_path")
+
+        self._configure_reportlab_styles()
+        logging.info("ReportGenerator initialized.")
+
+    def _configure_reportlab_styles(self):
+        self.styles.add(ParagraphStyle(name='ReportTitle',
+                                       fontName='Helvetica-Bold',
+                                       fontSize=28,
+                                       leading=32,
+                                       alignment=TA_CENTER,
+                                       spaceAfter=20,
+                                       textColor=HEADER_COLOR))
+        self.styles.add(ParagraphStyle(name='ReportSubtitle',
+                                       fontName='Helvetica',
+                                       fontSize=16,
+                                       leading=18,
+                                       alignment=TA_CENTER,
+                                       spaceAfter=30,
+                                       textColor=SUBHEADER_COLOR))
+        self.styles.add(ParagraphStyle(name='SectionHeader',
+                                       fontName='Helvetica-Bold',
+                                       fontSize=16,
+                                       leading=18,
+                                       spaceBefore=25,
+                                       spaceAfter=12,
+                                       textColor=PRIMARY_BUTTON_COLOR,
+                                       borderPadding=(5,5,5,5),
+                                       borderColor=PRIMARY_BUTTON_COLOR,
+                                       borderWidth=0.5,
+                                       borderRadius=5)) # Add some visual flair
+        self.styles.add(ParagraphStyle(name='NormalText',
+                                       fontName='Helvetica',
+                                       fontSize=11,
+                                       leading=14,
+                                       textColor=TEXT_COLOR))
+        self.styles.add(ParagraphStyle(name='NormalSmall',
+                                       fontName='Helvetica',
+                                       fontSize=10,
+                                       leading=12,
+                                       textColor=TEXT_COLOR))
+        self.styles.add(ParagraphStyle(name='Disclaimer',
+                                       fontName='Helvetica-Oblique',
+                                       fontSize=9,
+                                       leading=11,
+                                       alignment=TA_CENTER,
+                                       spaceBefore=25,
+                                       textColor=SUBHEADER_COLOR))
+        self.styles.add(ParagraphStyle(name='GPASummary',
+                                       fontName='Helvetica-Bold',
+                                       fontSize=20,
+                                       leading=24,
+                                       alignment=TA_CENTER,
+                                       spaceBefore=15,
+                                       spaceAfter=15,
+                                       textColor=HIGHLIGHT_COLOR,
+                                       backColor=colors.HexColor('#e8f5e9'), # Light green background for GPA
+                                       borderPadding=(10,10,10,10),
+                                       borderColor=HIGHLIGHT_COLOR,
+                                       borderWidth=1,
+                                       borderRadius=5))
+
+    def _generate_student_story(self, student_data, width, height, include_page_break=False):
+        story = []
+
+        # Institution Name & Logo (if available)
+        if self.logo_path and os.path.exists(self.logo_path):
+            try:
+                img = RLImage(self.logo_path, width=1.2*inch, height=1.2*inch) # Slightly larger logo
+                img.hAlign = 'CENTER'
+                story.append(img)
+                story.append(Spacer(1, 0.2 * inch))
+            except Exception as e:
+                logging.warning(f"Could not load logo from {self.logo_path}: {e}")
+                pass # Continue without logo
+
+        story.append(Paragraph(self.institution_name, self.styles['ReportTitle']))
+        story.append(Paragraph("Academic Performance Report", self.styles['ReportSubtitle']))
+        story.append(Spacer(1, 0.4 * inch))
+
+        # Student Information
+        story.append(Paragraph("Student Details", self.styles['SectionHeader']))
+        student_info_data = [
+            ["Student Name:", student_data['name']],
+            ["Entry Date:", student_data['entry_date']],
+            ["Total Subjects Recorded:", str(student_data['num_subjects'])]
+        ]
+        info_table = Table(student_info_data, colWidths=[1.7*inch, 4*inch])
+        info_table.setStyle(TableStyle([
+            ('FONTNAME', (0,0), (-1,-1), 'Helvetica'),
+            ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('LEFTPADDING', (0,0), (-1,-1), 0),
+        ]))
+        story.append(info_table)
+        story.append(Spacer(1, 0.3 * inch))
+
+        # Overall GPA
+        story.append(Paragraph(f"Overall GPA: {student_data['cumulative_gpa']:.2f}", self.styles['GPASummary']))
+        story.append(Spacer(1, 0.3 * inch))
+
+
+        # Subject Details Table
+        story.append(Paragraph("Subject Breakdown", self.styles['SectionHeader']))
+        table_data = [["Subject", "Mark", "Credits", "Semester", "Grade", "Subject GPA"]]
+        for idx, subject in enumerate(student_data["Subjects"]):
+            bg_color = TABLE_ROW_BG_EVEN if idx % 2 == 0 else TABLE_ROW_BG_ODD
+            table_data.append([
+                Paragraph(subject["name"], self.styles['NormalSmall']),
+                Paragraph(f"{subject['mark']:.2f}", self.styles['NormalSmall']),
+                Paragraph(str(subject['credits']), self.styles['NormalSmall']),
+                Paragraph(subject['semester'] if subject['semester'] else "N/A", self.styles['NormalSmall']),
+                Paragraph(subject["grade"], self.styles['NormalSmall']),
+                Paragraph(f"{subject['subject_gpa']:.2f}", self.styles['NormalSmall'])
+            ])
+
+        # Adjust colWidths to better fit landscape
+        col_widths = [2.2*inch, 0.8*inch, 0.8*inch, 1.2*inch, 0.8*inch, 1.0*inch]
+        table = Table(table_data, colWidths=col_widths)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), TABLE_HEADER_BG),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('GRID', (0, 0), (-1, -1), 0.5, TABLE_GRID_COLOR),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ] + [('BACKGROUND', (0, i), (-1, i), TABLE_ROW_BG_EVEN) for i in range(1, len(table_data)) if (i-1) % 2 == 0]
+          + [('BACKGROUND', (0, i), (-1, i), TABLE_ROW_BG_ODD) for i in range(1, len(table_data)) if (i-1) % 2 != 0]))
+        
+        story.append(table)
+        story.append(Spacer(1, 0.3 * inch))
+
+        # Semester GPAs (if applicable)
+        sem_gpas = self.gpa_calc.calculate_semester_gpa(student_data['Subjects'])
+        if sem_gpas:
+            story.append(Paragraph("Semester-wise GPA", self.styles['SectionHeader']))
+            sem_data = [["Semester", "GPA"]]
+            # Sort semesters for consistent reporting
+            sorted_semesters = sorted(sem_gpas.keys()) 
+            for sem in sorted_semesters:
+                sem_data.append([sem, f"{sem_gpas[sem]:.2f}"])
+            
+            sem_table = Table(sem_data, colWidths=[2.5*inch, 1.5*inch])
+            sem_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), TABLE_HEADER_BG),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('GRID', (0, 0), (-1, -1), 0.5, TABLE_GRID_COLOR),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ] + [('BACKGROUND', (0, i), (-1, i), TABLE_ROW_BG_EVEN) for i in range(1, len(sem_data)) if (i-1) % 2 == 0]
+              + [('BACKGROUND', (0, i), (-1, i), TABLE_ROW_BG_ODD) for i in range(1, len(sem_data)) if (i-1) % 2 != 0]))
+            
+            story.append(sem_table)
+            story.append(Spacer(1, 0.3 * inch))
+
+        # Matplotlib Charts (if available)
+        if MATPLOTLIB_AVAILABLE:
+            chart_buffer_gpa = self._create_gpa_chart(student_data)
+            if chart_buffer_gpa:
+                story.append(Paragraph("Subject Performance Chart", self.styles['SectionHeader']))
+                chart_img_gpa = RLImage(chart_buffer_gpa, width=6*inch, height=3*inch)
+                chart_img_gpa.hAlign = 'CENTER'
+                story.append(chart_img_gpa)
+                story.append(Spacer(1, 0.3 * inch))
+
+            chart_buffer_grades = self._create_grade_distribution_chart(student_data)
+            if chart_buffer_grades:
+                story.append(Paragraph("Grade Distribution", self.styles['SectionHeader']))
+                chart_img_grades = RLImage(chart_buffer_grades, width=6*inch, height=3*inch)
+                chart_img_grades.hAlign = 'CENTER'
+                story.append(chart_img_grades)
+                story.append(Spacer(1, 0.3 * inch))
+
+        # Disclaimer / Footer
+        story.append(Paragraph("This report is generated by the Academic Performance Analyzer. All calculations are based on the currently active grading scale.", self.styles['Disclaimer']))
+        story.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", self.styles['Disclaimer']))
+
+        if include_page_break:
+            story.append(PageBreak())
+        
+        logging.debug(f"Generated story for student: {student_data['name']}")
+        return story
+
+    def _create_gpa_chart(self, student_data):
+        """Generates a simple bar chart of subject GPAs."""
+        if not student_data['Subjects']:
+            return None
+            
+        subject_names = [s['name'] for s in student_data['Subjects']]
+        subject_gpas = [s['subject_gpa'] for s in student_data['Subjects']]
+
+        if not subject_names:
+            return None
+
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.bar(subject_names, subject_gpas, color=PRIMARY_BUTTON_COLOR)
+        ax.set_ylabel('GPA')
+        ax.set_title('Subject GPAs', fontsize=12, fontweight='bold')
+        ax.set_ylim(0, 5.0) # Assuming a 5.0 scale
+        ax.tick_params(axis='x', rotation=45, ha='right', labelsize=8)
+        ax.tick_params(axis='y', labelsize=8)
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+
+        buffer = io.BytesIO()
+        plt.savefig(buffer, format='png', bbox_inches='tight')
+        buffer.seek(0)
+        plt.close(fig) # Close the figure to free memory
+        return buffer
+
+    def _create_grade_distribution_chart(self, student_data):
+        """Generates a bar chart of letter grade distribution."""
+        if not student_data['Subjects']:
+            return None
+
+        grades = [s['grade'] for s in student_data['Subjects']]
+        if not grades:
+            return None
+
+        # Count occurrences of each grade
+        grade_counts = {}
+        for grade in grades:
+            grade_counts[grade] = grade_counts.get(grade, 0) + 1
+        
+        # Sort grades for consistent display (e.g., A+, A, A-, B, C, F)
+        grade_order = ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "D-", "F"]
+        sorted_grades = [g for g in grade_order if g in grade_counts]
+        sorted_counts = [grade_counts[g] for g in sorted_grades]
+
+        if not sorted_grades: # No valid grades found
+            return None
+
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.bar(sorted_grades, sorted_counts, color=SUCCESS_BUTTON_COLOR)
+        ax.set_xlabel('Letter Grade')
+        ax.set_ylabel('Number of Subjects')
+        ax.set_title('Grade Distribution', fontsize=12, fontweight='bold')
+        ax.tick_params(axis='x', labelsize=8)
+        ax.tick_params(axis='y', labelsize=8)
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+
+        buffer = io.BytesIO()
+        plt.savefig(buffer, format='png', bbox_inches='tight')
+        buffer.seek(0)
+        plt.close(fig) # Close the figure to free memory
+        return buffer
+
+    def generate_pdf_report(self, student_data, file_path):
+        try:
+            from reportlab.platypus import SimpleDocTemplate
+            doc_template = SimpleDocTemplate(file_path, pagesize=landscape(letter))
+            width, height = landscape(letter)
+            story = self._generate_student_story(student_data, width, height)
+            doc_template.build(story)
+            logging.info(f"PDF report generated for {student_data['name']} at {file_path}")
+        except Exception as e:
+            logging.error(f"Error generating single PDF report for {student_data['name']}: {e}", exc_info=True)
+            raise
+
+    def generate_all_pdf_report(self, all_students_data, file_path):
+        try:
+            from reportlab.platypus import SimpleDocTemplate
+            doc_template = SimpleDocTemplate(file_path, pagesize=landscape(letter))
+            full_story = []
+            for i, student_summary in enumerate(all_students_data):
+                # Fetch full details for each student as the 'all_students_data' might be summary
+                full_student_details = self.db.get_student_details(student_summary['id'])
+                if full_student_details:
+                    # Generate story for each student, add page break if not the last student
+                    story_part = self._generate_student_story(full_student_details, 
+                                                              landscape(letter)[0], 
+                                                              landscape(letter)[1], 
+                                                              include_page_break=(i < len(all_students_data) - 1))
+                    full_story.extend(story_part)
+            
+            if not full_story:
+                raise ValueError("No student data available to generate reports.")
+
+            doc_template.build(full_story)
+            logging.info(f"Combined PDF report generated for all students at {file_path}")
+        except Exception as e:
+            logging.error(f"Error generating all student PDF report: {e}", exc_info=True)
+            raise
+
+# --- CSV Exporter Class ---
+class CSVExporter:
+    def export_single_student_csv(self, student_data, file_path):
+        try:
+            # Prepare subject data
+            subjects_df = pd.DataFrame(student_data["Subjects"])
+            # Remove redundant 'id' and 'student_id' columns for cleaner export
+            if 'id' in subjects_df.columns:
+                subjects_df = subjects_df.drop(columns=['id'])
+            if 'student_id' in subjects_df.columns:
+                subjects_df = subjects_df.drop(columns=['student_id'])
+
+            # Prepare student info data
+            student_info_df = pd.DataFrame({
+                "Student Name": [student_data['name']],
+                "Entry Date": [student_data['entry_date']],
+                "Number of Subjects": [student_data['num_subjects']],
+                "Overall GPA": [f"{student_data['cumulative_gpa']:.2f}"]
+            })
+            
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                f.write("--- Student General Information ---\n")
+                student_info_df.to_csv(f, index=False)
+                f.write("\n--- Subject Details ---\n")
+                subjects_df.to_csv(f, index=False)
+                f.write("\n")
+            logging.info(f"Single student CSV exported for {student_data['name']} to {file_path}")
+        except Exception as e:
+            logging.error(f"Error exporting single student CSV for {student_data['name']}: {e}", exc_info=True)
+            raise
+
+    def export_all_students_csv(self, all_students_data, file_path, db_manager):
+        try:
+            records = []
+            for student in all_students_data:
+                full_student_details = db_manager.get_student_details(student['id'])
+                if not full_student_details or not full_student_details['Subjects']:
+                    # Add student even if no subjects, with blank subject fields
+                    records.append({
+                        "Student Name": full_student_details['name'],
+                        "Entry Date": full_student_details['entry_date'],
+                        "Overall GPA": f"{full_student_details['cumulative_gpa']:.2f}",
+                        "Subject Name": "", "Mark": "", "Credits": "", "Semester": "", "Grade": "", "Subject GPA": ""
+                    })
+                    continue 
+
+                for subject in full_student_details["Subjects"]:
+                    records.append({
+                        "Student Name": full_student_details["name"],
+                        "Entry Date": full_student_details["entry_date"],
+                        "Overall GPA": f"{full_student_details['cumulative_gpa']:.2f}",
+                        "Subject Name": subject["name"],
+                        "Mark": f"{subject['mark']:.2f}",
+                        "Credits": subject["credits"],
+                        "Semester": subject["semester"] if subject["semester"] else "N/A",
+                        "Grade": subject["grade"],
+                        "Subject GPA": f"{subject['subject_gpa']:.2f}"
+                    })
+            
+            if not records:
+                raise ValueError("No data to export.")
+
+            df = pd.DataFrame(records)
+            df.to_csv(file_path, index=False, encoding='utf-8')
+            logging.info(f"All students CSV exported to {file_path}")
+        except Exception as e:
+            logging.error(f"Error exporting all students CSV: {e}", exc_info=True)
+            raise
+
+# --- CSV Importer Class ---
+class CSVImporter:
+    def __init__(self, db_manager, gpa_calculator):
+        self.db = db_manager
+        self.gpa_calc = gpa_calculator
+
+    def import_data_from_csv(self, file_path):
+        try:
+            df = pd.read_csv(file_path)
+            
+            # Standardize column names for easier access (case-insensitive, common variations)
+            df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+            
+            col_map = {
+                'student_name': ['student name', 'name', 'full_name'],
+                'subject_name': ['subject name', 'subject', 'course'],
+                'mark': ['mark', 'score', 'grade_numeric'],
+                'credits': ['credits', 'credit_hours', 'units'],
+                'semester': ['semester', 'term'],
+                'entry_date': ['entry date', 'date']
+            }
+
+            mapped_df_columns = {}
+            for target_col, possible_cols in col_map.items():
+                for pc in possible_cols:
+                    if pc in df.columns:
+                        mapped_df_columns[target_col] = pc
+                        break
+            
+            required_cols_found = ["student_name", "subject_name", "mark"]
+            if not all(rc in mapped_df_columns for rc in required_cols_found):
+                missing = [rc for rc in required_cols_found if rc not in mapped_df_columns]
+                raise ValueError(f"Missing one or more required columns. Found: {list(df.columns)}. Needed: {', '.join(missing)}")
+
+            imported_count = 0
+            student_ids_to_recalculate = set() # To recalculate GPA for affected students
+
+            # Group by student name to process all subjects for one student
+            for student_name_raw, student_group in df.groupby(mapped_df_columns['student_name']):
+                student_name = str(student_name_raw).strip()
+                if not student_name:
+                    logging.warning(f"Skipping row with empty student name: {student_name_raw}")
+                    continue
+
+                entry_date = student_group[mapped_df_columns['entry_date']].iloc[0] if 'entry_date' in mapped_df_columns and not pd.isna(student_group[mapped_df_columns['entry_date']].iloc[0]) else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # Check if student already exists
+                existing_students = self.db.get_students(search_query=student_name)
+                existing_student_id = next((s['id'] for s in existing_students if s['name'].lower() == student_name.lower()), None)
+
+                if existing_student_id:
+                    student_id = existing_student_id
+                    logging.info(f"Student '{student_name}' already exists (ID: {student_id}). Adding/updating subjects.")
+                else:
+                    student_id = self.db.add_student(student_name, entry_date)
+                    if student_id == -1: # Duplicate name detected by DB, but was not caught by initial check
+                        logging.warning(f"Could not add student '{student_name}' due to duplicate name in DB after initial check. Skipping.")
+                        continue
+                    logging.info(f"New student '{student_name}' added (ID: {student_id}).")
+                
+                student_ids_to_recalculate.add(student_id)
+
+                for _, row in student_group.iterrows():
+                    subject_name = str(row[mapped_df_columns['subject_name']]).strip()
+                    if not subject_name:
+                        logging.warning(f"Skipping subject with empty name for student '{student_name}'.")
+                        continue
+                    
+                    try:
+                        mark = float(row[mapped_df_columns['mark']])
+                        if not (0 <= mark <= 100):
+                            raise ValueError("Mark must be between 0 and 100.")
+                    except (ValueError, TypeError):
+                        logging.warning(f"Invalid mark '{row[mapped_df_columns['mark']]}' for subject '{subject_name}' of student '{student_name}'. Skipping subject.")
+                        continue
+                    
+                    try:
+                        credits = int(row[mapped_df_columns['credits']]) if 'credits' in mapped_df_columns and not pd.isna(row[mapped_df_columns['credits']]) else 0
+                        if credits < 0:
+                            raise ValueError("Credits must be non-negative.")
+                    except (ValueError, TypeError):
+                        logging.warning(f"Invalid credits '{row[mapped_df_columns['credits']]}' for subject '{subject_name}' of student '{student_name}'. Defaulting to 0 credits.")
+                        credits = 0 # Default to 0 if invalid
+
+                    semester = str(row[mapped_df_columns['semester']]) if 'semester' in mapped_df_columns and not pd.isna(row[mapped_df_columns['semester']]) else None
+                    if semester: semester = semester.strip()
+
+                    subject_gpa = self.gpa_calc.get_gpa_from_mark(mark)
+                    grade = self.gpa_calc.get_letter_grade(mark)
+                    
+                    # Attempt to add subject. If duplicate, it means the subject already exists.
+                    # For simplicity in import, we'll overwrite it if a duplicate is found by deleting and re-adding.
+                    # A more robust solution might offer user choices for handling duplicates.
+                    
+                    # Check for existing subject entry (same student, same subject name, same semester)
+                    existing_subjects = self.db.get_student_details(student_id)['Subjects']
+                    found_existing_subject_id = None
+                    for existing_sub in existing_subjects:
+                        if existing_sub['name'].lower() == subject_name.lower() and \
+                           existing_sub['semester'] == semester:
+                           found_existing_subject_id = existing_sub['id']
+                           break
+
+                    if found_existing_subject_id:
+                        self.db.delete_subject(found_existing_subject_id)
+                        logging.info(f"Overwriting existing subject '{subject_name}' for student '{student_name}'.")
+
+                    self.db.add_subject(student_id, subject_name, mark, credits, semester, grade, subject_gpa)
+                imported_count += 1
+            
+            # Recalculate GPA for all affected students
+            for student_id in student_ids_to_recalculate:
+                student_data = self.db.get_student_details(student_id)
+                if student_data:
+                    subjects_for_gpa = [{'mark': sub['mark'], 'credits': sub['credits']} for sub in student_data['Subjects']]
+                    overall_gpa = self.gpa_calc.calculate_overall_gpa(subjects_for_gpa)
+                    self.db.update_student_gpa_info(student_id, overall_gpa, len(subjects_for_gpa))
+                    logging.info(f"Recalculated GPA for student ID {student_id} after import.")
+
+            return imported_count
+        except Exception as e:
+            logging.error(f"Error importing CSV from {file_path}: {e}", exc_info=True)
+            raise Exception(f"Error importing CSV: {e}. Please check file format.")
+
+# --- Grading Scale Manager Class ---
+class GradingScaleManager:
+    def __init__(self, parent_app, db_manager, gpa_calculator):
+        self.parent_app = parent_app
+        self.db = db_manager
+        self.gpa_calc = gpa_calculator
+        self.grading_scale_window = None
+        self.selected_scale_id = None
+        
+    def show_grading_scale_manager(self):
+        if self.grading_scale_window and self.grading_scale_window.winfo_exists():
+            self.grading_scale_window.lift()
+            return
+
+        self.grading_scale_window = tk.Toplevel(self.parent_app.root)
+        self.grading_scale_window.title("Manage Grading Scales")
+        self.grading_scale_window.geometry("700x550")
+        self.grading_scale_window.transient(self.parent_app.root)
+        self.grading_scale_window.grab_set()
+        self.grading_scale_window.resizable(False, False)
+
+        main_frame = ttk.Frame(self.grading_scale_window, padding=15, style='TFrame')
+        main_frame.pack(fill='both', expand=True)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        
+        # Scale List
+        list_frame = ttk.LabelFrame(main_frame, text="Existing Scales", padding=10)
+        list_frame.grid(row=0, column=0, columnspan=2, sticky='nsew', padx=5, pady=5)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        self.scale_tree = ttk.Treeview(list_frame, columns=("ID", "Name", "Active"), show="headings", selectmode='browse')
+        self.scale_tree.heading("ID", text="ID", anchor='center')
+        self.scale_tree.heading("Name", text="Scale Name", anchor='w')
+        self.scale_tree.heading("Active", text="Active", anchor='center')
+        self.scale_tree.column("ID", width=50, anchor='center', stretch=tk.NO)
+        self.scale_tree.column("Name", width=250, anchor='w')
+        self.scale_tree.column("Active", width=80, anchor='center', stretch=tk.NO)
+        self.scale_tree.pack(fill='both', expand=True)
+        self.scale_tree.bind("<<TreeviewSelect>>", self._on_scale_select)
+        
+        list_scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.scale_tree.yview)
+        list_scrollbar.pack(side="right", fill="y")
+        self.scale_tree.configure(yscrollcommand=list_scrollbar.set)
+        
+        # Scale Management Buttons
+        button_frame = ttk.Frame(main_frame, style='TFrame')
+        button_frame.grid(row=1, column=0, columnspan=2, pady=10)
+        
+        ttk.Button(button_frame, text="Add New Scale", command=self._add_scale_dialog, style='Success.TButton').pack(side='left', padx=5)
+        self.edit_scale_btn = ttk.Button(button_frame, text="Edit Selected Scale", command=self._edit_scale_dialog, style='Primary.TButton', state='disabled')
+        self.edit_scale_btn.pack(side='left', padx=5)
+        self.delete_scale_btn = ttk.Button(button_frame, text="Delete Selected Scale", command=self._delete_scale, style='Danger.TButton', state='disabled')
+        self.delete_scale_btn.pack(side='left', padx=5)
+        self.set_active_scale_btn = ttk.Button(button_frame, text="Set Active", command=self._set_active_scale, style='Info.TButton', state='disabled')
+        self.set_active_scale_btn.pack(side='left', padx=5)
+
+        self._load_scales_to_treeview()
+        logging.info("Grading scale manager opened.")
+        
+    def _load_scales_to_treeview(self):
+        for i in self.scale_tree.get_children():
+            self.scale_tree.delete(i)
+        
+        scales = self.db.get_grading_scales()
+        active_scale_id = self.gpa_calc.active_scale_id # Get currently active ID
+
+        for scale in scales:
+            is_active = "Yes" if str(scale['id']) == str(active_scale_id) else "No"
+            self.scale_tree.insert("", "end", iid=scale['id'], 
+                                   values=(scale['id'], scale['name'], is_active))
+        logging.debug("Grading scales loaded into Treeview.")
+
+    def _on_scale_select(self, event):
+        selected_item = self.scale_tree.focus()
+        if selected_item:
+            self.selected_scale_id = int(self.scale_tree.item(selected_item, 'iid')) # Ensure int
+            self.edit_scale_btn.config(state='normal')
+            self.delete_scale_btn.config(state='normal')
+            self.set_active_scale_btn.config(state='normal')
+            
+            # Disable delete if it's the only scale
+            if len(self.db.get_grading_scales()) <= 1:
+                self.delete_scale_btn.config(state='disabled')
+            # Disable 'Set Active' if already active
+            if str(self.selected_scale_id) == str(self.gpa_calc.active_scale_id):
+                self.set_active_scale_btn.config(state='disabled')
+        else:
+            self.selected_scale_id = None
+            self.edit_scale_btn.config(state='disabled')
+            self.delete_scale_btn.config(state='disabled')
+            self.set_active_scale_btn.config(state='disabled')
+        logging.debug(f"Scale selected: ID={self.selected_scale_id}")
+
+    def _add_scale_dialog(self):
+        self._open_scale_editor("Add New Grading Scale", None)
+
+    def _edit_scale_dialog(self):
+        if self.selected_scale_id:
+            selected_scale = next((s for s in self.db.get_grading_scales() if s['id'] == self.selected_scale_id), None)
+            if selected_scale:
+                self._open_scale_editor("Edit Grading Scale", selected_scale)
+            else:
+                messagebox.showerror("Error", "Selected scale not found in database.")
+                logging.error(f"Selected scale ID {self.selected_scale_id} not found for editing.")
+        else:
+            messagebox.showinfo("No Selection", "Please select a grading scale to edit.")
+
+    def _open_scale_editor(self, title, scale_data=None):
+        editor_window = tk.Toplevel(self.grading_scale_window)
+        editor_window.title(title)
+        editor_window.geometry("500x450")
+        editor_window.transient(self.grading_scale_window)
+        editor_window.grab_set()
+        editor_window.resizable(False, False)
+
+        frame = ttk.Frame(editor_window, padding=10, style='TFrame')
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame, text="Scale Name:", font=(FONT_FAMILY, NORMAL_FONT_SIZE, 'bold')).pack(pady=5)
+        scale_name_entry = ttk.Entry(frame, width=40, font=(FONT_FAMILY, NORMAL_FONT_SIZE))
+        scale_name_entry.pack(pady=5)
+        ToolTip(scale_name_entry, "Unique name for the grading scale (e.g., '4.0 Scale', 'Pass/Fail').")
+
+        ttk.Label(frame, text="Rules (Format: MarkRange: GPA_Value, one per line):", font=(FONT_FAMILY, NORMAL_FONT_SIZE, 'bold')).pack(pady=5)
+        ttk.Label(frame, text="Examples: '80-100: 5.0', '<60: 0.0', '70: 3.5'", font=(FONT_FAMILY, SMALL_FONT_SIZE), foreground=SUBHEADER_COLOR).pack(pady=(0,5))
+        rules_text = tk.Text(frame, height=10, width=50, font=(FONT_FAMILY, NORMAL_FONT_SIZE), relief='flat', bd=1, highlightbackground=TABLE_GRID_COLOR, highlightthickness=1)
+        rules_text.pack(pady=5)
+        
+        status_label = ttk.Label(frame, text="", foreground=ERROR_COLOR, font=(FONT_FAMILY, SMALL_FONT_SIZE))
+        status_label.pack(pady=5)
+
+        if scale_data:
+            scale_name_entry.insert(0, scale_data['name'])
+            # Sort rules for consistent display (e.g., by mark range start)
+            sorted_rules = sorted(scale_data['rules'].items(), key=lambda item: int(item[0].split('-')[0]) if '-' in item[0] else float('-inf'))
+            rules_str = "\n".join([f"{r}: {g}" for r, g in sorted_rules])
+            rules_text.insert('1.0', rules_str)
+
+        def save_scale():
+            name = scale_name_entry.get().strip()
+            rules_raw = rules_text.get('1.0', 'end').strip()
+
+            if not name:
+                status_label.config(text="Scale name cannot be empty.")
+                return
+
+            rules = {}
+            parsed_ranges = [] # To check for overlapping ranges
+            try:
+                for line_num, line in enumerate(rules_raw.split('\n')):
+                    if not line.strip(): continue
+                    parts = line.split(':')
+                    if len(parts) != 2:
+                        raise ValueError(f"Invalid format on line {line_num+1}: '{line}'. Expected 'Range: GPA'.")
+                    
+                    range_key = parts[0].strip()
+                    gpa_val_str = parts[1].strip()
+                    
+                    try:
+                        gpa_val = float(gpa_val_str)
+                    except ValueError:
+                        raise ValueError(f"Invalid GPA value '{gpa_val_str}' on line {line_num+1}. Must be a number.")
+                    
+                    # More robust range parsing
+                    low, high = None, None
+                    if '-' in range_key:
+                        r_parts = range_key.split('-')
+                        if len(r_parts) != 2: raise ValueError(f"Invalid range format '{range_key}' on line {line_num+1}.")
+                        low, high = int(r_parts[0]), int(r_parts[1])
+                        if low > high: raise ValueError(f"Invalid range '{range_key}' on line {line_num+1}: lower bound cannot be greater than upper bound.")
+                    elif '<=' in range_key:
+                        high = int(range_key.replace('<=', ''))
+                        low = 0 # Assume 0 as lower bound
+                    elif '>=' in range_key:
+                        low = int(range_key.replace('>=', ''))
+                        high = 100 # Assume 100 as upper bound
+                    elif '<' in range_key:
+                        high = int(range_key.replace('<', '')) - 1 # Exclusive upper bound
+                        low = 0
+                    elif '>' in range_key:
+                        low = int(range_key.replace('>', '')) + 1 # Exclusive lower bound
+                        high = 100
+                    else: # Assume exact number
+                        low = high = int(range_key)
+                    
+                    if low is not None and high is not None:
+                        # Check for overlaps
+                        for existing_low, existing_high in parsed_ranges:
+                            if max(low, existing_low) <= min(high, existing_high):
+                                raise ValueError(f"Overlapping range detected on line {line_num+1} with existing rule. Range: {range_key}")
+                        parsed_ranges.append((low, high))
+
+                    rules[range_key] = gpa_val
+            except ValueError as e:
+                status_label.config(text=f"Error in rules: {e}")
+                logging.warning(f"Error parsing grading scale rules: {e}")
+                return
+
+            if not rules:
+                status_label.config(text="No valid grading rules entered.")
+                return
+
+            try:
+                if scale_data: # Editing existing scale
+                    success = self.db.update_grading_scale(scale_data['id'], name, rules)
+                    if success:
+                        messagebox.showinfo("Success", "Grading scale updated successfully.")
+                        editor_window.destroy()
+                        self._load_scales_to_treeview()
+                        self.parent_app.show_status_message(f"Grading scale '{name}' updated.", "success")
+                    else:
+                        status_label.config(text="Error: Scale name already exists.")
+                else: # Adding new scale
+                    success = self.db.add_grading_scale(name, rules)
+                    if success:
+                        messagebox.showinfo("Success", "Grading scale added successfully.")
+                        editor_window.destroy()
+                        self._load_scales_to_treeview()
+                        self.parent_app.show_status_message(f"Grading scale '{name}' added.", "success")
+                    else:
+                        status_label.config(text="Error: Scale name already exists.")
+            except Exception as e:
+                status_label.config(text=f"Database Error: {e}")
+                logging.error(f"Error saving grading scale: {e}", exc_info=True)
+        
+        ttk.Button(frame, text="Save Scale", command=save_scale, style='Success.TButton').pack(pady=10)
+
+    def _delete_scale(self):
+        if self.selected_scale_id:
+            if str(self.selected_scale_id) == str(self.gpa_calc.active_scale_id):
+                messagebox.showerror("Error", "Cannot delete the active grading scale. Please set another scale as active first.")
+                logging.warning(f"Attempted to delete active grading scale ID {self.selected_scale_id}.")
+                return
+
+            if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this grading scale? This action cannot be undone."):
+                try:
+                    self.db.delete_grading_scale(self.selected_scale_id)
+                    messagebox.showinfo("Success", "Grading scale deleted successfully.")
+                    self._load_scales_to_treeview()
+                    self.selected_scale_id = None
+                    self._on_scale_select(None) # Reset button states
+                    self.parent_app.show_status_message("Grading scale deleted.", "success")
+                except Exception as e:
+                    messagebox.showerror("Deletion Error", f"Failed to delete grading scale: {e}")
+                    logging.error(f"Error deleting grading scale ID {self.selected_scale_id}: {e}", exc_info=True)
+        else:
+            messagebox.showinfo("No Selection", "Please select a grading scale to delete.")
+
+    def _set_active_scale(self):
+        if self.selected_scale_id:
+            try:
+                self.gpa_calc.update_active_scale(self.selected_scale_id)
+                messagebox.showinfo("Success", f"'{self.scale_tree.item(self.selected_scale_id, 'values')[1]}' is now the active grading scale.")
+                self._load_scales_to_treeview() # Refresh treeview to show active status
+                self._on_scale_select(None) # Reset button states
+                self.parent_app.show_status_message(f"Active grading scale set to '{self.scale_tree.item(self.selected_scale_id, 'values')[1]}'.", "info")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to set active scale: {e}")
+                logging.error(f"Error setting active grading scale ID {self.selected_scale_id}: {e}", exc_info=True)
+        else:
+            messagebox.showinfo("No Selection", "Please select a grading scale to set as active.")
+
+# --- Main Application Class ---
+class ProfessionalGPAApp:
+    def __init__(self, root):
+        self.root = root
+        self.db = DatabaseManager(DB_FILENAME)
+        self.gpa_calculator = GPACalculator(self.db)
+        self.report_generator = ReportGenerator(self.db, self.gpa_calculator)
+        self.csv_exporter = CSVExporter()
+        self.csv_importer = CSVImporter(self.db, self.gpa_calculator)
+        self.grading_scale_manager = GradingScaleManager(self, self.db, self.gpa_calculator)
+
+        self._configure_root_window()
+        self._set_app_icon()
+        self._apply_styling()
+
+        self.student_name_entry_widget = None
+        self.subject_frames = [] # To hold frames for dynamic subject inputs
+        self.output_label = None
+        self.canvas_scroll_bind_id = None
+        self.scrollable_frame_id = None
+        self.current_student_id = None # Store ID for current student being viewed
+        self.status_bar = None # Placeholder for status bar
+
+        self.show_welcome_screen()
+        logging.info("ProfessionalGPAApp initialized and welcome screen displayed.")
+        
+    def _configure_root_window(self):
+        self.root.title(f"🎓 Academic Performance Analyzer - {self.db.get_setting('institution_name')}")
+        self.root.geometry("1000x750") # Increased default size
+        self.root.configure(bg=BG_COLOR)
+        self.root.resizable(True, True)
+        self.root.minsize(900, 700)
+
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
+        # Create status bar
+        self.status_bar = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor='w', 
+                                   font=(FONT_FAMILY, SMALL_FONT_SIZE), background=BG_COLOR, foreground=TEXT_COLOR)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X, ipadx=5, ipady=2)
+        logging.debug("Root window configured and status bar created.")
+
+    def show_status_message(self, message, type="info", duration_ms=3000):
+        color = TEXT_COLOR
+        if type == "success":
+            color = SUCCESS_BUTTON_COLOR
+        elif type == "error":
+            color = DANGER_BUTTON_COLOR
+        elif type == "warning":
+            color = INFO_BUTTON_COLOR # Using info color for warning as well
+        
+        self.status_bar.config(text=message, foreground=color)
+        if hasattr(self, '_status_timer_id'):
+            self.root.after_cancel(self._status_timer_id)
+        self._status_timer_id = self.root.after(duration_ms, lambda: self.status_bar.config(text="Ready", foreground=TEXT_COLOR))
+        logging.info(f"Status message: [{type}] {message}")
+
+    def _set_app_icon(self):
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(script_dir, APP_ICON_FILENAME)
+            if os.path.exists(icon_path):
+                self.root.iconbitmap(icon_path)
+                logging.info(f"App icon set from: {icon_path}")
+            else:
+                logging.warning(f"App icon '{APP_ICON_FILENAME}' not found at {icon_path}.")
+        except Exception as e:
+            logging.error(f"Error setting app icon: {e}", exc_info=True)
+            pass # Continue without icon
+
+    def _apply_styling(self):
+        self.style = ttk.Style()
+        self.style.theme_use('clam') # Good base theme
+
+        # Define custom themes for buttons and other widgets
+        self.style.configure('TFrame', background=BG_COLOR)
+        self.style.configure('TLabel', background=BG_COLOR, font=(FONT_FAMILY, NORMAL_FONT_SIZE), foreground=TEXT_COLOR)
+        self.style.configure('Header.TLabel', font=(FONT_FAMILY, HEADER_FONT_SIZE, 'bold'), foreground=HEADER_COLOR)
+        self.style.configure('SubHeader.TLabel', font=(FONT_FAMILY, SUBHEADER_FONT_SIZE, 'italic'), foreground=SUBHEADER_COLOR)
+        
+        self.style.configure('TEntry', fieldbackground='#ffffff', bordercolor='#cccccc', borderradius=5, font=(FONT_FAMILY, NORMAL_FONT_SIZE))
+        self.style.configure('TText', background='#ffffff', font=(FONT_FAMILY, NORMAL_FONT_SIZE))
+        self.style.map('TEntry', fieldbackground=[('focus', '#e6f7ff')]) # Light blue on focus
+
+        self.style.configure('TButton', font=(FONT_FAMILY, BUTTON_FONT_SIZE, 'bold'), padding=8, relief='flat', borderwidth=0)
+        self.style.map('TButton',
+                       background=[('active', '#d0d0d0')],
+                       foreground=[('active', 'black')])
+
+        self.style.configure('Primary.TButton', foreground='white', background=PRIMARY_BUTTON_COLOR)
+        self.style.map('Primary.TButton',
+                        background=[('pressed', '#2980b9'), ('active', '#2980b9')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+
+        self.style.configure('Success.TButton', foreground='white', background=SUCCESS_BUTTON_COLOR)
+        self.style.map('Success.TButton',
+                        background=[('pressed', '#229a54'), ('active', '#229a54')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+
+        self.style.configure('Danger.TButton', foreground='white', background=DANGER_BUTTON_COLOR)
+        self.style.map('Danger.TButton',
+                        background=[('pressed', '#c0392b'), ('active', '#c0392b')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+
+        self.style.configure('Info.TButton', foreground='white', background=INFO_BUTTON_COLOR)
+        self.style.map('Info.TButton',
+                        background=[('pressed', '#7a3e9c'), ('active', '#7a3e9c')],
+                        foreground=[('pressed', 'white'), ('active', 'white')])
+        
+        self.style.configure('Treeview',
+                             background="#ffffff",
+                             foreground=TEXT_COLOR,
+                             rowheight=28, # Increased row height for better readability
+                             fieldbackground="#ffffff")
+        self.style.map('Treeview', background=[('selected', HIGHLIGHT_COLOR)])
+        self.style.configure('Treeview.Heading',
+                             font=(FONT_FAMILY, 11, 'bold'),
+                             background='#f0f0f0',
+                             foreground=HEADER_COLOR,
+                             relief='raised')
+        self.style.configure('TLabelframe', background=BG_COLOR, bordercolor='#ccc', relief='solid', borderwidth=1)
+        self.style.configure('TLabelframe.Label', background=BG_COLOR, font=(FONT_FAMILY, 11, 'bold'), foreground=HEADER_COLOR)
+        logging.debug("Application styling applied.")
+
+    def clear_window(self):
+        if self.canvas_scroll_bind_id:
+            self.root.unbind("<MouseWheel>", self.canvas_scroll_bind_id)
+            self.canvas_scroll_bind_id = None
+        for widget in self.root.winfo_children():
+            if widget is not self.status_bar: # Don't destroy status bar
+                widget.destroy()
+        logging.debug("Window cleared.")
+
+    def show_welcome_screen(self):
+        self.clear_window()
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(0, weight=1)
+        main_container.grid_columnconfigure(0, weight=1)
+
+        content_frame = ttk.Frame(main_container, style='TFrame')
+        content_frame.pack(expand=True, fill='both', pady=20)
+
+        ttk.Label(content_frame, text="Academic Performance Analyzer", style='Header.TLabel').pack(pady=(10, 5))
+        ttk.Label(content_frame, text="Comprehensive GPA Calculation and Reporting System", 
+                  style='SubHeader.TLabel').pack(pady=(0, 20))
+        
+        logo_placeholder = ttk.Frame(content_frame, height=120, width=120, relief='flat',
+                                     borderwidth=0, style='TFrame')
+        logo_placeholder.pack(pady=15)
+        ttk.Label(logo_placeholder, text="🎓", font=(FONT_FAMILY, 60, 'bold'), foreground=HIGHLIGHT_COLOR, background=BG_COLOR).place(relx=0.5, rely=0.5, anchor='center')
+        
+        ttk.Label(content_frame, text="Key Features:", font=(FONT_FAMILY, 12, 'bold')).pack(anchor='center', pady=(15, 10))
+
+        features = [
+            "✓ Calculate Weighted GPA with customizable grading scales",
+            "✓ Dynamic addition/removal of subjects for flexible data entry",
+            "✓ Generate detailed PDF reports with charts (individual and aggregate)",
+            "✓ Robust data management with SQLite database",
+            "✓ Seamless data Import/Export via CSV",
+            "✓ Comprehensive dashboard for efficient student management",
+            "✓ User-friendly interface with tooltips and status notifications"
+        ]
+        
+        for feature in features:
+            ttk.Label(content_frame, text=feature, font=(FONT_FAMILY, NORMAL_FONT_SIZE)).pack(anchor='center', pady=2, padx=10)
+        
+        button_frame = ttk.Frame(content_frame, padding="20 10")
+        button_frame.pack(pady=(30, 10))
+        
+        ttk.Button(button_frame, text="Manage Students", style='Success.TButton', 
+                   command=self.show_dashboard).pack(side='left', padx=15)
+        ttk.Button(button_frame, text="Settings", style='Info.TButton',
+                   command=self.show_settings_dialog).pack(side='left', padx=15)
+        ttk.Button(button_frame, text="Help", style='Info.TButton', 
+                   command=self.show_help).pack(side='left', padx=15)
+        ttk.Button(button_frame, text="Exit", style='Danger.TButton', 
+                   command=self.root.quit).pack(side='left', padx=15)
+        
+        footer_frame = ttk.Frame(content_frame, padding="10 5")
+        footer_frame.pack(side='bottom', fill='x', pady=(20, 0))
+        
+        ttk.Label(footer_frame, text=f"© {datetime.now().year} {self.db.get_setting('institution_name')} - Academic Tools Division", 
+                  font=(FONT_FAMILY, 9, 'italic'), foreground="#95a5a6", anchor='center').pack(pady=5)
+        self.show_status_message("Welcome to Academic Performance Analyzer.", "info")
+    
+    def show_help(self):
+        help_window = tk.Toplevel(self.root)
+        help_window.title("Help Documentation")
+        help_window.geometry("800x600")
+        help_window.resizable(False, False)
+        help_window.transient(self.root)
+        help_window.grab_set()
+        
+        notebook = ttk.Notebook(help_window)
+        notebook.pack(fill='both', expand=True, padx=15, pady=15)
+        
+        quick_start = ttk.Frame(notebook, padding=10)
+        notebook.add(quick_start, text="Quick Start")
+        quick_start_text = """
+        **Academic Performance Analyzer - Quick Start Guide**
+        
+        This application helps you calculate and report student GPAs efficiently.
+        
+        1.  **Manage Students (Dashboard):**
+            -   From the welcome screen, click "Manage Students".
+            -   Here you can add new students, view/edit existing ones, or delete records.
+            -   Use the search bar to find specific students.
+        
+        2.  **Add/Edit Student Information:**
+            -   Click "Add New Student" or "View/Edit Selected" on the Dashboard.
+            -   Enter student's full name. You can dynamically add/remove subjects using the '+' and '-' buttons.
+            -   For each subject, enter name, mark (0-100), credits (non-negative integer), and semester (optional).
+            -   Credits are crucial for weighted GPA calculation. If not applicable, enter 0.
+            -   All inputs are validated. Green border indicates valid, red border indicates error.
+            -   Press `Tab` or `Enter` to navigate fields, "Submit Data" when done.
+        
+        3.  **View Results:**
+            -   After submission, a detailed report for the current student appears, including overall and semester-wise GPA, and graphical charts (if Matplotlib is installed).
+            -   Navigate between student reports using "← Previous Student" and "Next Student →".
+        
+        4.  **Export Options:**
+            -   **Export Student PDF/CSV:** Generates report for the currently displayed student.
+            -   **Export All to CSV/PDF:** Compiles reports for all students into one file (CSV for data, PDF for structured reports).
+        
+        5.  **Import Data:**
+            -   Use "Import Students from CSV" on the Dashboard to load data from a structured CSV file.
+            -   CSV must contain "Student Name", "Subject Name", "Mark" columns. "Credits", "Semester", and "Entry Date" are optional. Existing student/subject data will be updated if matches are found.
+        
+        6.  **Settings:**
+            -   Access "Settings" from the Welcome screen to change Institution Name, Logo Path, and manage Grading Scales.
+        """
+        self._create_scrollable_text_tab(quick_start, quick_start_text, help_window)
+        
+        grading_scale = ttk.Frame(notebook, padding=10)
+        notebook.add(grading_scale, text="Grading Scale")
+        scale_info = """
+        **Customizable GPA Grading Scales:**
+        
+        This application allows you to define and use multiple grading scales. The default is a 5.0 scale.
+        
+        **Default Standard 5.0 Scale:**
+        | Mark Range | Grade Points | Letter Grade |
+        | :--------- | :----------- | :----------- |
+        | 80-100     | 5.00         | A+           |
+        | 70-79      | 4.00         | A            |
+        | 60-69      | 3.50         | A-           |
+        | 50-59      | 3.00         | B            |
+        | 40-49      | 2.00         | C            |
+        | Below 40   | 0.00         | F (Fail)     |
+        
+        **Defining Rules:**
+        Rules should be entered as `MarkRange: GPA_Value` on separate lines.
+        Examples of valid mark ranges:
+        -   `80-100`: For marks between 80 and 100 (inclusive).
+        -   `90`: For an exact mark of 90.
+        -   `<40`: For marks less than 40.
+        -   `<=39`: For marks less than or equal to 39.
+        -   `>80`: For marks greater than 80.
+        -   `>=70`: For marks greater than or equal to 70.
+        
+        **Important:** Ensure your ranges do not overlap to avoid ambiguous GPA calculations. The system will warn you if overlaps are detected.
+        
+        **Final GPA Calculation:**
+        The system calculates the **weighted average** of all individual subject grade points.
+        Formula: `(Sum of (Subject GPA * Credits)) / (Total Credits)`
+        If credits for a subject are not provided (or are 0), that subject is treated as having 1 unit for a simple average calculation alongside weighted subjects.
+        
+        **Managing Scales:**
+        Go to `Settings -> Manage Grading Scales` to add, edit, or delete scales.
+        """
+        self._create_scrollable_text_tab(grading_scale, scale_info, help_window)
+        
+        about = ttk.Frame(notebook, padding=10)
+        notebook.add(about, text="About")
+        about_info = f"""
+        **Academic Performance Analyzer**
+        
+        Version: 3.1.0 (Professional Edition)
+        Developed by: {self.db.get_setting('institution_name')} - Academic Tools Division
+        Release Date: {datetime.now().strftime('%B %Y')}
+        
+        **Purpose:**
+        This tool is designed to assist educational institutions and individuals in
+        accurately calculating and presenting academic performance metrics (GPA)
+        in a clear, professional, and easily digestible format.
+        
+        **Key Architectural Enhancements (v3.1.0):**
+        -   **Dynamic Subject Entry:** Flexible UI for adding/removing subject rows.
+        -   **Enhanced Input Validation:** Real-time feedback for subject marks and credits.
+        -   **Advanced Reporting Charts:** Visual representation of subject GPAs and grade distribution (requires Matplotlib).
+        -   **Robust Error Logging:** Detailed logs for troubleshooting and development.
+        -   **User-Friendly Notifications:** Status bar messages for immediate feedback.
+        -   **Improved CSV Import Logic:** Better column mapping and handling of existing data.
+        
+        **Dependencies:**
+        -   Python 3.x
+        -   `tkinter` (built-in)
+        -   `pandas` (for CSV import/export)
+        -   `reportlab` (for PDF generation)
+        -   `sqlite3` (built-in, for database)
+        -   `matplotlib` (Optional, for charts in PDF reports)
+        
+        For technical support, feature requests, or collaboration inquiries, please contact:
+        academicsupport@{self.db.get_setting('institution_name').lower().replace(' ', '')}.edu
+        """
+        self._create_scrollable_text_tab(about, about_info, help_window)
+        
+        ttk.Button(help_window, text="Close Help", command=help_window.destroy, style='Primary.TButton').pack(pady=15)
+        logging.info("Help documentation displayed.")
+
+    def _create_scrollable_text_tab(self, parent_frame, text_content, top_level_window):
+        text_widget = tk.Text(parent_frame, wrap='word', font=(FONT_FAMILY, 10),
+                              bg="#ffffff", fg=TEXT_COLOR, relief='flat', padx=10, pady=10)
+        text_widget.insert('end', text_content)
+        text_widget.config(state='disabled') # Make it read-only
+        
+        scrollbar = ttk.Scrollbar(parent_frame, orient='vertical', command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        
+        text_widget.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        # Bind mouse wheel for scrolling the text widget
+        text_widget.bind("<MouseWheel>", lambda e: text_widget.yview_scroll(int(-1*(e.delta/120)), "units"))
+        parent_frame.bind("<MouseWheel>", lambda e: text_widget.yview_scroll(int(-1*(e.delta/120)), "units"))
+        logging.debug("Created scrollable text tab.")
+
+    def show_settings_dialog(self):
+        settings_window = tk.Toplevel(self.root)
+        settings_window.title("Application Settings")
+        settings_window.geometry("600x450")
+        settings_window.transient(self.root)
+        settings_window.grab_set()
+        settings_window.resizable(False, False)
+
+        main_frame = ttk.Frame(settings_window, padding=20, style='TFrame')
+        main_frame.pack(fill='both', expand=True)
+        main_frame.columnconfigure(1, weight=1)
+
+        # Institution Name
+        ttk.Label(main_frame, text="Institution Name:", font=(FONT_FAMILY, NORMAL_FONT_SIZE, 'bold')).grid(row=0, column=0, sticky='w', pady=5, padx=5)
+        self.institution_name_var = tk.StringVar(value=self.db.get_setting("institution_name"))
+        institution_entry = ttk.Entry(main_frame, textvariable=self.institution_name_var, width=40, font=(FONT_FAMILY, NORMAL_FONT_SIZE))
+        institution_entry.grid(row=0, column=1, sticky='ew', pady=5, padx=5)
+        ToolTip(institution_entry, "Name of your institution for reports and branding.")
+
+        # Logo Path
+        ttk.Label(main_frame, text="Institution Logo Path:", font=(FONT_FAMILY, NORMAL_FONT_SIZE, 'bold')).grid(row=1, column=0, sticky='w', pady=5, padx=5)
+        self.logo_path_var = tk.StringVar(value=self.db.get_setting("logo_path"))
+        logo_path_entry = ttk.Entry(main_frame, textvariable=self.logo_path_var, width=40, font=(FONT_FAMILY, NORMAL_FONT_SIZE))
+        logo_path_entry.grid(row=1, column=1, sticky='ew', pady=5, padx=5)
+        browse_logo_btn = ttk.Button(main_frame, text="Browse...", command=self._browse_logo_path, style='TButton')
+        browse_logo_btn.grid(row=1, column=2, padx=5, sticky='e')
+        ToolTip(logo_path_entry, "Full path to the institution's logo image file (PNG, JPG, etc.) for PDF reports.")
+        ToolTip(browse_logo_btn, "Click to select a logo file from your computer.")
+
+
+        # Active Grading Scale Selection
+        ttk.Label(main_frame, text="Active Grading Scale:", font=(FONT_FAMILY, NORMAL_FONT_SIZE, 'bold')).grid(row=2, column=0, sticky='w', pady=10, padx=5)
+        self.active_scale_combobox = ttk.Combobox(main_frame, state='readonly', font=(FONT_FAMILY, NORMAL_FONT_SIZE))
+        self.active_scale_combobox.grid(row=2, column=1, sticky='ew', pady=10, padx=5)
+        self._load_grading_scales_for_combobox()
+        ToolTip(self.active_scale_combobox, "Select the grading scale to be used for all GPA calculations.")
+        
+        # Button to manage grading scales
+        manage_scales_btn = ttk.Button(main_frame, text="Manage Grading Scales", command=self.grading_scale_manager.show_grading_scale_manager, style='Primary.TButton')
+        manage_scales_btn.grid(row=3, column=0, columnspan=3, pady=15)
+        ToolTip(manage_scales_btn, "Add, edit, or delete custom grading scales.")
+
+
+        # Database Backup/Restore
+        ttk.Label(main_frame, text="Database Actions:", font=(FONT_FAMILY, NORMAL_FONT_SIZE, 'bold')).grid(row=4, column=0, sticky='w', pady=10, padx=5)
+        db_actions_frame = ttk.Frame(main_frame, style='TFrame')
+        db_actions_frame.grid(row=4, column=1, columnspan=2, sticky='ew', pady=10, padx=5)
+        
+        backup_btn = ttk.Button(db_actions_frame, text="Backup Database", command=self._backup_database, style='Info.TButton')
+        backup_btn.pack(side='left', padx=5)
+        ToolTip(backup_btn, "Create a backup copy of your entire student database.")
+        
+        restore_btn = ttk.Button(db_actions_frame, text="Restore Database", command=self._restore_database, style='Danger.TButton')
+        restore_btn.pack(side='left', padx=5)
+        ToolTip(restore_btn, "Restore database from a backup file. WARNING: This will overwrite current data!")
+
+        # Save and Cancel Buttons
+        button_frame = ttk.Frame(main_frame, style='TFrame')
+        button_frame.grid(row=5, column=0, columnspan=3, pady=20)
+        save_btn = ttk.Button(button_frame, text="Save Settings", command=lambda: self._save_settings(settings_window), style='Success.TButton')
+        save_btn.pack(side='left', padx=10)
+        ToolTip(save_btn, "Save all changes to application settings.")
+        
+        cancel_btn = ttk.Button(button_frame, text="Cancel", command=settings_window.destroy, style='Danger.TButton')
+        cancel_btn.pack(side='left', padx=10)
+        ToolTip(cancel_btn, "Discard changes and close the settings window.")
+        logging.info("Settings dialog opened.")
+
+    def _browse_logo_path(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Institution Logo",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.tiff *.ico")]
+        )
+        if file_path:
+            self.logo_path_var.set(file_path)
+            logging.debug(f"Logo path selected: {file_path}")
+
+    def _load_grading_scales_for_combobox(self):
+        scales = self.db.get_grading_scales()
+        scale_names = [scale['name'] for scale in scales]
+        scale_ids = {scale['name']: scale['id'] for scale in scales}
+        self.active_scale_combobox['values'] = scale_names
+        
+        # Set current active scale in combobox
+        current_active_scale = next((s for s in scales if str(s['id']) == str(self.gpa_calculator.active_scale_id)), None)
+        if current_active_scale:
+            self.active_scale_combobox.set(current_active_scale['name'])
+        elif scales: # If no active scale found but scales exist, select the first one
+            self.active_scale_combobox.set(scales[0]['name'])
+            self.gpa_calculator.update_active_scale(scales[0]['id']) # Update setting as well
+        
+        self.scale_ids_map = scale_ids # Store map for later lookup
+        logging.debug("Grading scales loaded for combobox.")
+
+    def _save_settings(self, settings_window):
+        institution_name = self.institution_name_var.get().strip()
+        logo_path = self.logo_path_var.get().strip()
+        selected_scale_name = self.active_scale_combobox.get()
+
+        if not institution_name:
+            messagebox.showerror("Error", "Institution Name cannot be empty.")
+            logging.warning("Failed to save settings: Institution Name empty.")
+            return
+
+        selected_scale_id = self.scale_ids_map.get(selected_scale_name)
+        if not selected_scale_id:
+            messagebox.showerror("Error", "Please select a valid grading scale.")
+            logging.warning("Failed to save settings: No valid grading scale selected.")
+            return
+
+        try:
+            self.db.update_setting("institution_name", institution_name)
+            self.db.update_setting("logo_path", logo_path)
+            self.db.update_setting("active_grading_scale_id", selected_scale_id)
+            
+            # Update GPA Calculator's active scale immediately
+            self.gpa_calculator.update_active_scale(selected_scale_id)
+            self.root.title(f"🎓 Academic Performance Analyzer - {institution_name}") # Update main window title
+            self.report_generator.institution_name = institution_name # Update report generator's setting
+            self.report_generator.logo_path = logo_path # Update report generator's setting
+            
+            messagebox.showinfo("Settings Saved", "Application settings updated successfully.")
+            settings_window.destroy()
+            self.show_status_message("Settings saved successfully.", "success")
+            logging.info("Application settings saved.")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save settings: {e}")
+            logging.error(f"Error saving settings: {e}", exc_info=True)
+
+    def _backup_database(self):
+        backup_dir = filedialog.askdirectory(title="Select Backup Directory")
+        if not backup_dir:
+            return
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"gpa_data_backup_{timestamp}.db"
+        backup_path = os.path.join(backup_dir, backup_filename)
+        
+        try:
+            conn = self.db._get_connection()
+            backup_conn = sqlite3.connect(backup_path)
+            with backup_conn:
+                conn.backup(backup_conn)
+            backup_conn.close()
+            conn.close()
+            messagebox.showinfo("Backup Successful", f"Database backed up to:\n{backup_path}")
+            self.show_status_message(f"Database backed up to {os.path.basename(backup_path)}", "success")
+            logging.info(f"Database backed up to: {backup_path}")
+        except Exception as e:
+            messagebox.showerror("Backup Error", f"Failed to backup database: {e}")
+            self.show_status_message("Database backup failed.", "error")
+            logging.error(f"Error backing up database to {backup_path}: {e}", exc_info=True)
+
+    def _restore_database(self):
+        if not messagebox.askyesno("Confirm Restore", "WARNING: Restoring the database will overwrite all current student data. Are you sure you want to proceed?"):
+            return
+
+        file_path = filedialog.askopenfilename(
+            defaultextension=".db",
+            filetypes=[("Database files", "*.db"), ("All files", "*.*")],
+            title="Select Database Backup File to Restore"
+        )
+        if not file_path:
+            return
+        
+        try:
+            # Close existing connections to the current database
+            # This is a bit tricky with ReportLab keeping a connection open.
+            # Best practice would be to restart the app after restore.
+            # For simplicity for this example, we'll try to re-initialize DBManager.
+            del self.db
+            os.remove(DB_FILENAME) # Delete current database
+            
+            # Copy the backup file to the original database path
+            import shutil
+            shutil.copyfile(file_path, DB_FILENAME)
+            
+            # Re-initialize the DatabaseManager and re-configure app
+            self.db = DatabaseManager(DB_FILENAME)
+            self.gpa_calculator = GPACalculator(self.db)
+            self.report_generator = ReportGenerator(self.db, self.gpa_calculator)
+            self.csv_importer = CSVImporter(self.db, self.gpa_calculator)
+            self.grading_scale_manager = GradingScaleManager(self, self.db, self.gpa_calculator)
+            
+            # Refresh UI based on new data
+            self.show_dashboard() 
+            self._load_grading_scales_for_combobox() # Update settings dialog if open
+            self.root.title(f"🎓 Academic Performance Analyzer - {self.db.get_setting('institution_name')}") # Update main window title
+            
+            messagebox.showinfo("Restore Successful", "Database restored successfully. The application has been refreshed.")
+            self.show_status_message("Database restored successfully.", "success")
+            logging.info(f"Database restored from: {file_path}")
+        except Exception as e:
+            messagebox.showerror("Restore Error", f"Failed to restore database: {e}\n\nIt is recommended to restart the application after this error.")
+            self.show_status_message("Database restore failed.", "error")
+            logging.error(f"Error restoring database from {file_path}: {e}", exc_info=True)
+
+    def show_dashboard(self):
+        self.clear_window()
+        
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(2, weight=1) # Treeview row
+        main_container.grid_columnconfigure(0, weight=1)
+
+        header_frame = ttk.Frame(main_container, padding="0 0 0 10")
+        header_frame.grid(row=0, column=0, sticky='ew', padx=20, pady=(20, 10))
+        ttk.Label(header_frame, text="Student Management Dashboard", style='Header.TLabel').pack(side='left')
+        back_to_welcome_btn = ttk.Button(header_frame, text="← Back to Welcome", style='Danger.TButton', 
+                   command=self.show_welcome_screen)
+        back_to_welcome_btn.pack(side='right', padx=(10,0))
+        ToolTip(back_to_welcome_btn, "Return to the main welcome screen.")
+
+        # Search and Filter frame
+        search_frame = ttk.Frame(main_container, padding="10")
+        search_frame.grid(row=1, column=0, sticky='ew', padx=20, pady=5)
+        search_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(search_frame, text="Search Student:", font=(FONT_FAMILY, NORMAL_FONT_SIZE, 'bold')).grid(row=0, column=0, sticky='w', padx=5)
+        self.search_entry = ttk.Entry(search_frame, width=30, font=(FONT_FAMILY, NORMAL_FONT_SIZE))
+        self.search_entry.grid(row=0, column=1, sticky='ew', padx=5)
+        self.search_entry.bind('<KeyRelease>', self._update_student_list)
+        ToolTip(self.search_entry, "Type to filter students by name.")
+
+        import_csv_btn = ttk.Button(search_frame, text="Import Students from CSV", style='Info.TButton',
+                   command=self._import_students_csv)
+        import_csv_btn.grid(row=0, column=2, padx=10)
+        ToolTip(import_csv_btn, "Import student and subject data from a CSV file.")
+
+        # Student List Treeview
+        tree_frame = ttk.Frame(main_container)
+        tree_frame.grid(row=2, column=0, sticky='nsew', padx=20, pady=5)
+
+        columns = ("ID", "Student Name", "Entry Date", "Subjects", "Overall GPA")
+        self.student_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', selectmode='browse')
+        
+        self.student_tree.heading("ID", text="ID", anchor='center')
+        self.student_tree.heading("Student Name", text="Student Name", anchor='w')
+        self.student_tree.heading("Entry Date", text="Entry Date", anchor='center')
+        self.student_tree.heading("Subjects", text="Subjects", anchor='center')
+        self.student_tree.heading("Overall GPA", text="Overall GPA", anchor='center')
+        
+        self.student_tree.column("ID", width=60, anchor='center', stretch=tk.NO)
+        self.student_tree.column("Student Name", width=200, anchor='w')
+        self.student_tree.column("Entry Date", width=150, anchor='center')
+        self.student_tree.column("Subjects", width=80, anchor='center')
+        self.student_tree.column("Overall GPA", width=100, anchor='center')
+        
+        self.student_tree.pack(side="left", fill="both", expand=True)
+        self.student_tree.bind("<<TreeviewSelect>>", self._on_student_select)
+        
+        # Context Menu for Treeview
+        self.treeview_context_menu = tk.Menu(self.root, tearoff=0)
+        self.treeview_context_menu.add_command(label="View/Edit Student", command=self._view_edit_selected_student)
+        self.treeview_context_menu.add_command(label="Delete Student", command=self._delete_selected_student)
+        self.student_tree.bind("<Button-3>", self._show_treeview_context_menu) # Right-click
+
+        tree_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.student_tree.yview)
+        tree_scrollbar.pack(side="right", fill="y")
+        self.student_tree.configure(yscrollcommand=tree_scrollbar.set)
+
+        # Dashboard Action Buttons
+        button_frame = ttk.Frame(main_container, padding="10")
+        button_frame.grid(row=3, column=0, sticky='ew', padx=20, pady=(10, 20))
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
+        button_frame.columnconfigure(2, weight=1)
+        button_frame.columnconfigure(3, weight=1)
+        button_frame.columnconfigure(4, weight=1)
+
+
+        add_student_btn = ttk.Button(button_frame, text="Add New Student", style='Success.TButton', 
+                   command=lambda: self.show_student_entry_screen(student_id=None))
+        add_student_btn.grid(row=0, column=0, padx=5, sticky='e')
+        ToolTip(add_student_btn, "Add a new student record to the database.")
+
+        self.view_edit_btn = ttk.Button(button_frame, text="View/Edit Selected", style='Primary.TButton', 
+                                        command=self._view_edit_selected_student, state='disabled')
+        self.view_edit_btn.grid(row=0, column=1, padx=5)
+        ToolTip(self.view_edit_btn, "View or modify the selected student's details and subjects.")
+        
+        self.delete_btn = ttk.Button(button_frame, text="Delete Selected", style='Danger.TButton', 
+                                     command=self._delete_selected_student, state='disabled')
+        self.delete_btn.grid(row=0, column=2, padx=5)
+        ToolTip(self.delete_btn, "Permanently delete the selected student record and all associated subjects.")
+
+        export_all_csv_btn = ttk.Button(button_frame, text="Export All to CSV", style='Info.TButton',
+                   command=self._export_all_to_csv)
+        export_all_csv_btn.grid(row=0, column=3, padx=5)
+        ToolTip(export_all_csv_btn, "Export all student data to a single CSV file.")
+        
+        export_all_pdf_btn = ttk.Button(button_frame, text="Export All to PDF", style='Info.TButton',
+                   command=self._export_all_to_pdf)
+        export_all_pdf_btn.grid(row=0, column=4, padx=5, sticky='w')
+        ToolTip(export_all_pdf_btn, "Generate a combined PDF report for all students.")
+
+        # Summary Statistics
+        summary_frame = ttk.Frame(main_container, style='TFrame', padding=(15, 5))
+        summary_frame.grid(row=4, column=0, sticky='ew', padx=20, pady=(0, 10))
+        
+        self.total_students_label = ttk.Label(summary_frame, text="Total Students: 0", font=(FONT_FAMILY, 11, 'bold'))
+        self.total_students_label.pack(side='left', padx=10)
+        self.avg_gpa_label = ttk.Label(summary_frame, text="Average GPA (All Students): N/A", font=(FONT_FAMILY, 11, 'bold'))
+        self.avg_gpa_label.pack(side='left', padx=20)
+
+
+        self._update_student_list()
+        self.show_status_message("Dashboard loaded.", "info")
+        logging.info("Dashboard displayed.")
+
+    def _show_treeview_context_menu(self, event):
+        item_id = self.student_tree.identify_row(event.y)
+        if item_id:
+            self.student_tree.selection_set(item_id)
+            self._on_student_select(None) # Update button states
+            self.treeview_context_menu.post(event.x_root, event.y_root)
+        
+    def _update_student_list(self, event=None):
+        search_query = self.search_entry.get().strip()
+        students = self.db.get_students(search_query=search_query)
+        
+        # Clear existing entries
+        for item in self.student_tree.get_children():
+            self.student_tree.delete(item)
+            
+        total_gpa_sum = 0.0
+        total_gpa_count = 0
+        
+        for student in students:
+            self.student_tree.insert("", "end", iid=student['id'],
+                                     values=(student['id'], student['name'], student['entry_date'], 
+                                             student['num_subjects'], f"{student['cumulative_gpa']:.2f}"))
+            if student['num_subjects'] > 0: # Only count students who have subjects
+                total_gpa_sum += student['cumulative_gpa']
+                total_gpa_count += 1
+
+        self.total_students_label.config(text=f"Total Students: {len(students)}")
+        if total_gpa_count > 0:
+            avg_gpa = total_gpa_sum / total_gpa_count
+            self.avg_gpa_label.config(text=f"Average GPA (Active Students): {avg_gpa:.2f}")
+        else:
+            self.avg_gpa_label.config(text="Average GPA (Active Students): N/A")
+
+        self._on_student_select(None) # Disable buttons if no selection
+        logging.debug(f"Student list updated with search query: '{search_query}'. Total students: {len(students)}.")
+
+    def _on_student_select(self, event):
+        selected_item = self.student_tree.focus()
+        if selected_item:
+            self.current_student_id = self.student_tree.item(selected_item, 'iid')
+            self.view_edit_btn.config(state='normal')
+            self.delete_btn.config(state='normal')
+        else:
+            self.current_student_id = None
+            self.view_edit_btn.config(state='disabled')
+            self.delete_btn.config(state='disabled')
+
+    def _view_edit_selected_student(self):
+        if self.current_student_id:
+            self.show_student_entry_screen(student_id=self.current_student_id)
+        else:
+            messagebox.showinfo("No Selection", "Please select a student from the list.")
+            self.show_status_message("No student selected.", "warning")
+
+    def _delete_selected_student(self):
+        if self.current_student_id:
+            student_name = self.student_tree.item(self.current_student_id, 'values')[1]
+            if messagebox.askyesno("Confirm Delete", f"Are you sure you want to permanently delete {student_name}'s record and all associated subjects? This cannot be undone."):
+                try:
+                    self.db.delete_student(self.current_student_id)
+                    messagebox.showinfo("Deleted", f"Record for {student_name} deleted successfully.")
+                    self._update_student_list()
+                    self.show_status_message(f"Student '{student_name}' deleted.", "success")
+                except Exception as e:
+                    messagebox.showerror("Deletion Error", f"Failed to delete student: {e}")
+                    self.show_status_message(f"Failed to delete student '{student_name}'.", "error")
+                    logging.error(f"Error deleting student ID {self.current_student_id}: {e}", exc_info=True)
+        else:
+            messagebox.showinfo("No Selection", "Please select a student to delete.")
+            self.show_status_message("No student selected for deletion.", "warning")
+
+    def _import_students_csv(self):
+        file_path = filedialog.askopenfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Import Student Data from CSV"
+        )
+        if not file_path:
+            return
+
+        try:
+            imported_count = self.csv_importer.import_data_from_csv(file_path)
+            messagebox.showinfo("Import Successful", f"Successfully imported/updated {imported_count} student records from {os.path.basename(file_path)}.")
+            self._update_student_list() # Refresh dashboard
+            self.show_status_message(f"Imported/updated {imported_count} students.", "success")
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import data:\n{e}")
+            self.show_status_message(f"CSV import failed: {e}", "error")
+
+    def show_student_entry_screen(self, student_id=None):
+        self.clear_window()
+        self.subject_frames = [] # Reset list of subject frames
+        self.current_student_id = student_id # Store ID if editing existing student
+
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(1, weight=1)
+        main_container.grid_columnconfigure(0, weight=1)
+
+        header_frame = ttk.Frame(main_container, padding="0 0 0 10")
+        header_frame.grid(row=0, column=0, sticky='ew', padx=20, pady=(20, 10))
+        
+        ttk.Label(header_frame, text="Student Information Entry", style='Header.TLabel').pack(side='left')
+        back_btn = ttk.Button(header_frame, text="← Back to Dashboard", style='Danger.TButton', 
+                   command=self.show_dashboard)
+        back_btn.pack(side='right', padx=(10,0))
+        ToolTip(back_btn, "Discard changes and return to the student dashboard.")
+        
+        content_frame = ttk.Frame(main_container, padding="40")
+        content_frame.grid(row=1, column=0, sticky='nsew', padx=40, pady=10)
+        content_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(content_frame, text="Student Name:", font=(FONT_FAMILY, 12, 'bold')).grid(row=0, column=0, sticky='w', pady=(10, 15), padx=(0, 10))
+        self.student_name_entry_widget = ttk.Entry(content_frame, width=40, font=(FONT_FAMILY, 12))
+        self.student_name_entry_widget.grid(row=0, column=1, sticky='ew', pady=(10, 15))
+        ToolTip(self.student_name_entry_widget, "Enter the full name of the student. Must be unique.")
+        
+        # Scrollable area for subjects
+        self.canvas = tk.Canvas(content_frame, bg=BG_COLOR, highlightthickness=0)
+        self.canvas.grid(row=2, column=0, columnspan=2, sticky='nsew', pady=10, padx=0)
+        content_frame.grid_rowconfigure(2, weight=1)
+
+        scrollbar = ttk.Scrollbar(content_frame, orient="vertical", command=self.canvas.yview)
+        scrollbar.grid(row=2, column=2, sticky='ns')
+        
+        self.scrollable_frame = ttk.Frame(self.canvas, padding="10", style='TFrame')
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        
+        self.scrollable_frame_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.canvas.bind('<Configure>', 
+                         lambda e: self.canvas.itemconfig(self.scrollable_frame_id, width=e.width))
+
+        if self.canvas_scroll_bind_id:
+            self.root.unbind("<MouseWheel>", self.canvas_scroll_bind_id)
+        self.canvas_scroll_bind_id = self.root.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        # Add/Remove Subject Buttons
+        subject_action_frame = ttk.Frame(content_frame, style='TFrame')
+        subject_action_frame.grid(row=3, column=0, columnspan=2, pady=(10, 5), sticky='ew')
+        
+        add_subject_btn = ttk.Button(subject_action_frame, text="➕ Add Subject", style='Primary.TButton', command=self.add_subject_row)
+        add_subject_btn.pack(side='left', padx=(0, 10))
+        ToolTip(add_subject_btn, "Add a new row for subject entry.")
+
+        remove_subject_btn = ttk.Button(subject_action_frame, text="➖ Remove Last Subject", style='Danger.TButton', command=self.remove_subject_row)
+        remove_subject_btn.pack(side='left')
+        ToolTip(remove_subject_btn, "Remove the last subject entry row.")
+        
+        self.output_label = ttk.Label(content_frame, text='', foreground=ERROR_COLOR, font=(FONT_FAMILY, 10, 'italic'))
+        self.output_label.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        
+        submit_button_frame = ttk.Frame(main_container, padding="20 0")
+        submit_button_frame.grid(row=2, column=0, columnspan=2, pady=(10, 20)) # Placed outside content_frame
+        submit_btn = ttk.Button(submit_button_frame, text='Submit Data', style='Success.TButton', command=self.store_student_data)
+        submit_btn.pack()
+        ToolTip(submit_btn, "Save student and subject data and calculate GPA.")
+        
+        self.student_name_entry_widget.focus_set()
+
+        # If editing an existing student, load their data
+        if self.current_student_id:
+            self.show_status_message("Loading existing student data...", "info")
+            student_data = self.db.get_student_details(self.current_student_id)
+            if student_data:
+                self.student_name_entry_widget.insert(0, student_data['name'])
+                # Populate existing subjects
+                for subject in student_data['Subjects']:
+                    self.add_subject_row(initial_data=subject)
+                if not student_data['Subjects']: # If no subjects, add one empty row
+                    self.add_subject_row()
+                self.show_status_message(f"Editing student: {student_data['name']}", "info")
+            else:
+                messagebox.showerror("Error", "Could not load student data for editing.")
+                self.show_dashboard()
+                return
+        else:
+            self.add_subject_row() # Start with one empty subject row for new student
+            self.show_status_message("Enter new student and subject details.", "info")
+        logging.info(f"Student entry screen opened for student ID: {student_id}")
+
+    def add_subject_row(self, initial_data=None):
+        subject_frame_data = {} # To hold references to entries and validation labels
+
+        subject_frame = ttk.Frame(self.scrollable_frame, padding="8 8", relief='groove', borderwidth=1, style='TFrame')
+        subject_frame.pack(fill='x', pady=5)
+        
+        subject_frame.columnconfigure(1, weight=2) 
+        subject_frame.columnconfigure(3, weight=1)
+        subject_frame.columnconfigure(5, weight=1)
+        subject_frame.columnconfigure(7, weight=1)
+
+        ttk.Label(subject_frame, text=f"Subject Name:", font=(FONT_FAMILY, 10, 'bold')).grid(row=0, column=0, sticky='w', padx=(0, 5))
+        sub_entry = ttk.Entry(subject_frame, font=(FONT_FAMILY, 10))
+        sub_entry.grid(row=0, column=1, padx=(5, 10), sticky='ew')
+        ToolTip(sub_entry, "Enter the name of the subject.")
+        
+        ttk.Label(subject_frame, text="Mark (0-100):", font=(FONT_FAMILY, 10, 'bold')).grid(row=0, column=2, sticky='w', padx=(0, 5))
+        mark_entry = ttk.Entry(subject_frame, font=(FONT_FAMILY, 10), width=8)
+        mark_entry.grid(row=0, column=3, sticky='ew')
+        mark_error_label = ttk.Label(subject_frame, text="", foreground=ERROR_COLOR, font=(FONT_FAMILY, 8))
+        mark_error_label.grid(row=1, column=3, sticky='nw', columnspan=1)
+        mark_entry.bind('<FocusOut>', lambda e, m_entry=mark_entry, m_err_lbl=mark_error_label: self.validate_mark_input(m_entry, m_err_lbl))
+        mark_entry.bind('<KeyRelease>', lambda e, m_entry=mark_entry, m_err_lbl=mark_error_label: self.validate_mark_input(m_entry, m_err_lbl))
+        ToolTip(mark_entry, "Enter the numerical mark (0-100).")
+
+        ttk.Label(subject_frame, text="Credits:", font=(FONT_FAMILY, 10, 'bold')).grid(row=0, column=4, sticky='w', padx=(10, 5))
+        credits_entry = ttk.Entry(subject_frame, font=(FONT_FAMILY, 10), width=6)
+        credits_entry.grid(row=0, column=5, sticky='ew')
+        credits_error_label = ttk.Label(subject_frame, text="", foreground=ERROR_COLOR, font=(FONT_FAMILY, 8))
+        credits_error_label.grid(row=1, column=5, sticky='nw', columnspan=1)
+        credits_entry.bind('<FocusOut>', lambda e, c_entry=credits_entry, c_err_lbl=credits_error_label: self.validate_credits_input(c_entry, c_err_lbl))
+        credits_entry.bind('<KeyRelease>', lambda e, c_entry=credits_entry, c_err_lbl=credits_error_label: self.validate_credits_input(c_entry, c_err_lbl))
+        ToolTip(credits_entry, "Enter the credit hours for the subject (non-negative integer).")
+
+        ttk.Label(subject_frame, text="Semester:", font=(FONT_FAMILY, 10, 'bold')).grid(row=0, column=6, sticky='w', padx=(10, 5))
+        semester_entry = ttk.Entry(subject_frame, font=(FONT_FAMILY, 10), width=12)
+        semester_entry.grid(row=0, column=7, sticky='ew')
+        ToolTip(semester_entry, "Enter the semester/term name (optional).")
+        
+        subject_frame_data['frame'] = subject_frame
+        subject_frame_data['name_entry'] = sub_entry
+        subject_frame_data['mark_entry'] = mark_entry
+        subject_frame_data['mark_error_label'] = mark_error_label
+        subject_frame_data['credits_entry'] = credits_entry
+        subject_frame_data['credits_error_label'] = credits_error_label
+        subject_frame_data['semester_entry'] = semester_entry
+
+        # Load initial data if provided (for editing existing students)
+        if initial_data:
+            sub_entry.insert(0, initial_data.get('name', ''))
+            mark_entry.insert(0, str(initial_data.get('mark', '')))
+            credits_entry.insert(0, str(initial_data.get('credits', '')))
+            semester_entry.insert(0, initial_data.get('semester', '') or '')
+            subject_frame_data['subject_id'] = initial_data.get('id') # Store original subject ID for updates
+
+        self.subject_frames.append(subject_frame_data)
+        
+        # Bind Enter key for sequential navigation within newly added row
+        sub_entry.bind('<Return>', lambda e: mark_entry.focus_set())
+        mark_entry.bind('<Return>', lambda e: credits_entry.focus_set())
+        credits_entry.bind('<Return>', lambda e: semester_entry.focus_set())
+        semester_entry.bind('<Return>', lambda e: self.add_subject_row()) # Add new row on Enter in last field
+
+        self.scrollable_frame.update_idletasks()
+        self.canvas.yview_moveto(1) # Scroll to bottom to show new entry
+        logging.debug(f"Added subject row. Total rows: {len(self.subject_frames)}")
+
+    def remove_subject_row(self):
+        if len(self.subject_frames) > 0:
+            last_frame_data = self.subject_frames.pop()
+            last_frame_data['frame'].destroy()
+            self.scrollable_frame.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox("all")) # Recalculate scroll region
+            self.show_status_message("Last subject row removed.", "info")
+            logging.debug(f"Removed subject row. Total rows: {len(self.subject_frames)}")
+        else:
+            self.show_status_message("No subject rows to remove.", "warning")
+
+    def validate_mark_input(self, entry_widget, error_label):
+        mark_str = entry_widget.get().strip()
+        try:
+            mark = float(mark_str)
+            if not (0 <= mark <= 100):
+                raise ValueError("Mark must be between 0 and 100.")
+            entry_widget.config(relief='flat', highlightbackground=SUCCESS_BUTTON_COLOR, highlightthickness=1)
+            error_label.config(text="")
+            return True
+        except ValueError as e:
+            entry_widget.config(relief='solid', highlightbackground=DANGER_BUTTON_COLOR, highlightthickness=1)
+            error_label.config(text=str(e))
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error validating mark: {e}", exc_info=True)
+            entry_widget.config(relief='solid', highlightbackground=DANGER_BUTTON_COLOR, highlightthickness=1)
+            error_label.config(text="Invalid input format.")
+            return False
+
+    def validate_credits_input(self, entry_widget, error_label):
+        credits_str = entry_widget.get().strip()
+        try:
+            credits = int(credits_str)
+            if credits < 0:
+                raise ValueError("Credits must be non-negative.")
+            entry_widget.config(relief='flat', highlightbackground=SUCCESS_BUTTON_COLOR, highlightthickness=1)
+            error_label.config(text="")
+            return True
+        except ValueError as e:
+            entry_widget.config(relief='solid', highlightbackground=DANGER_BUTTON_COLOR, highlightthickness=1)
+            error_label.config(text=str(e))
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error validating credits: {e}", exc_info=True)
+            entry_widget.config(relief='solid', highlightbackground=DANGER_BUTTON_COLOR, highlightthickness=1)
+            error_label.config(text="Invalid input format.")
+            return False
+
+    def store_student_data(self):
+        student_name = self.student_name_entry_widget.get().strip()
+        if not student_name:
+            self.output_label.config(text="Student Name cannot be empty.")
+            self.student_name_entry_widget.focus_set()
+            self.show_status_message("Student name is required.", "error")
+            return
+        
+        if not self.subject_frames:
+            self.output_label.config(text="At least one subject is required.")
+            self.show_status_message("Please add at least one subject.", "error")
+            return
+
+        all_valid = True
+        subjects_to_process = [] # Data ready for DB operation
+
+        for i, frame_data in enumerate(self.subject_frames):
+            sub = frame_data['name_entry'].get().strip()
+            mark_entry = frame_data['mark_entry']
+            credits_entry = frame_data['credits_entry']
+            semester = frame_data['semester_entry'].get().strip() or None # Store empty as None
+
+            # Perform validation for each subject
+            is_mark_valid = self.validate_mark_input(mark_entry, frame_data['mark_error_label'])
+            is_credits_valid = self.validate_credits_input(credits_entry, frame_data['credits_error_label'])
+
+            if not sub:
+                self.output_label.config(text=f"Subject name for row {i+1} cannot be empty.")
+                frame_data['name_entry'].focus_set()
+                all_valid = False
+                break
+            
+            if not is_mark_valid or not is_credits_valid:
+                self.output_label.config(text=f"Please correct errors in Subject {i+1} data.")
+                all_valid = False
+                break
+            
+            try:
+                mark = float(mark_entry.get().strip())
+                credits = int(credits_entry.get().strip())
+                subjects_to_process.append({
+                    "id": frame_data.get('subject_id'), # Will be None for new subjects
+                    "name": sub,
+                    "mark": mark,
+                    "credits": credits,
+                    "semester": semester
+                })
+            except (ValueError, TypeError) as e:
+                # Should ideally be caught by specific validators above, but as a fallback
+                self.output_label.config(text=f"Data conversion error in row {i+1}: {e}")
+                all_valid = False
+                logging.error(f"Data conversion error for subject in row {i+1}: {e}", exc_info=True)
+                break
+        
+        if not all_valid:
+            self.show_status_message("Please correct all input errors.", "error")
+            return
+
+        self.output_label.config(text="Processing...", foreground=TEXT_COLOR)
+        self.root.update_idletasks() # Force UI update
+
+        try:
+            current_student_db_id = self.current_student_id
+            
+            if current_student_db_id: # Update existing student
+                old_student_data = self.db.get_student_details(current_student_db_id)
+                if old_student_data['name'] != student_name:
+                    # Only attempt to update name if it changed
+                    name_updated = self.db.update_student_name(current_student_db_id, student_name)
+                    if not name_updated:
+                        messagebox.showerror("Error", f"Could not update student name to '{student_name}' as another student with this name already exists.")
+                        self.output_label.config(text="Student name already exists.", foreground=ERROR_COLOR)
+                        self.show_status_message("Student name already exists.", "error")
+                        return
+
+                # Collect existing subject IDs for deletion check
+                existing_subject_ids = {sub['id'] for sub in old_student_data['Subjects']}
+                subjects_to_keep_ids = set()
+
+                for sub_data in subjects_to_process:
+                    subject_id = sub_data.get('id')
+                    subject_gpa = self.gpa_calculator.get_gpa_from_mark(sub_data["mark"])
+                    grade = self.gpa_calculator.get_letter_grade(sub_data["mark"])
+
+                    if subject_id and subject_id in existing_subject_ids:
+                        # Update existing subject
+                        updated = self.db.update_subject(subject_id, sub_data["name"], sub_data["mark"], 
+                                                     sub_data["credits"], sub_data["semester"], grade, subject_gpa)
+                        if not updated: # Could be due to duplicate subject name/semester after update
+                            messagebox.showerror("Error", f"Could not update subject '{sub_data['name']}' due to a duplicate entry with the same name and semester for this student.")
+                            self.output_label.config(text="Duplicate subject/semester detected.", foreground=ERROR_COLOR)
+                            self.show_status_message("Duplicate subject/semester found.", "error")
+                            return # Stop processing
+                        subjects_to_keep_ids.add(subject_id)
+                    else:
+                        # Add new subject
+                        added = self.db.add_subject(current_student_db_id, sub_data["name"], sub_data["mark"], 
+                                                sub_data["credits"], sub_data["semester"], grade, subject_gpa)
+                        if not added: # Could be due to duplicate subject name/semester on add
+                            messagebox.showerror("Error", f"Could not add subject '{sub_data['name']}' due to a duplicate entry with the same name and semester for this student.")
+                            self.output_label.config(text="Duplicate subject/semester detected.", foreground=ERROR_COLOR)
+                            self.show_status_message("Duplicate subject/semester found.", "error")
+                            return # Stop processing
+
+                # Delete subjects that were removed from the UI
+                for old_sub_id in existing_subject_ids - subjects_to_keep_ids:
+                    self.db.delete_subject(old_sub_id)
+
+                self.show_status_message(f"Student '{student_name}' updated successfully.", "success")
+
+            else: # Add new student
+                new_student_id = self.db.add_student(student_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                if new_student_id == -1: # Duplicate name caught by DB
+                    messagebox.showerror("Error", f"A student with the name '{student_name}' already exists. Please choose a different name.")
+                    self.output_label.config(text="Student name already exists.", foreground=ERROR_COLOR)
+                    self.student_name_entry_widget.focus_set()
+                    self.show_status_message("Student name already exists.", "error")
+                    return
+                current_student_db_id = new_student_id
+                
+                for sub_data in subjects_to_process:
+                    subject_gpa = self.gpa_calculator.get_gpa_from_mark(sub_data["mark"])
+                    grade = self.gpa_calculator.get_letter_grade(sub_data["mark"])
+                    added = self.db.add_subject(current_student_db_id, sub_data["name"], sub_data["mark"], 
+                                                sub_data["credits"], sub_data["semester"], grade, subject_gpa)
+                    if not added: # Should not happen for new student unless data contains duplicate subjects in one go
+                         messagebox.showerror("Error", f"Could not add subject '{sub_data['name']}' due to a duplicate entry with the same name and semester for this student.")
+                         self.output_label.config(text="Duplicate subject/semester detected during initial add.", foreground=ERROR_COLOR)
+                         self.show_status_message("Duplicate subject/semester found.", "error")
+                         return
+
+                self.show_status_message(f"Student '{student_name}' added successfully.", "success")
+
+            # Recalculate GPA after all subject operations
+            student_data_for_gpa = self.db.get_student_details(current_student_db_id)
+            if student_data_for_gpa:
+                subjects_for_gpa_calc = [{'mark': sub['mark'], 'credits': sub['credits']} for sub in student_data_for_gpa['Subjects']]
+                overall_gpa = self.gpa_calculator.calculate_overall_gpa(subjects_for_gpa_calc)
+                self.db.update_student_gpa_info(current_student_db_id, overall_gpa, len(subjects_for_gpa_calc))
+
+            self.show_student_result(current_student_db_id)
+
+        except Exception as e:
+            messagebox.showerror("Database Error", f"An error occurred while saving student data: {e}")
+            self.output_label.config(text=f"Saving failed: {e}", foreground=ERROR_COLOR)
+            self.show_status_message("Failed to save student data.", "error")
+            logging.critical(f"Critical error storing student data for {student_name}: {e}", exc_info=True)
+
+
+    def show_student_result(self, student_id):
+        self.clear_window()
+        student_data = self.db.get_student_details(student_id)
+        if not student_data:
+            messagebox.showerror("Error", "Student data not found.")
+            self.show_dashboard()
+            self.show_status_message("Student data not found.", "error")
+            logging.error(f"Attempted to display results for non-existent student ID: {student_id}")
+            return
+            
+        self.current_student_id = student_id # Ensure this is updated
+        
+        main_container = ttk.Frame(self.root, style='TFrame', padding="20")
+        main_container.grid(row=0, column=0, sticky='nsew')
+        main_container.grid_rowconfigure(2, weight=1)
+        main_container.grid_columnconfigure(0, weight=1)
+
+        header_frame = ttk.Frame(main_container, padding="0 0 0 10")
+        header_frame.grid(row=0, column=0, sticky='ew', padx=20, pady=(20, 10))
+        
+        ttk.Label(header_frame, text=f"Academic Results: {student_data['name']}", style='Header.TLabel').pack(side='left')
+        
+        nav_frame = ttk.Frame(header_frame)
+        nav_frame.pack(side='right')
+        
+        students_ids_list = [s['id'] for s in self.db.get_students()]
+        current_index_in_list = students_ids_list.index(student_id) if student_id in students_ids_list else -1
+
+        if current_index_in_list > 0:
+            prev_btn = ttk.Button(nav_frame, text="← Previous Student", style='Primary.TButton', 
+                       command=lambda: self.show_student_result(students_ids_list[current_index_in_list - 1]))
+            prev_btn.pack(side='left', padx=5)
+            ToolTip(prev_btn, "View the previous student in the list.")
+        
+        dashboard_btn = ttk.Button(nav_frame, text="Back to Dashboard", style='Danger.TButton', 
+                   command=self.show_dashboard)
+        dashboard_btn.pack(side='left', padx=5)
+        ToolTip(dashboard_btn, "Return to the student dashboard.")
+        
+        if current_index_in_list != -1 and current_index_in_list < len(students_ids_list) - 1:
+            next_btn = ttk.Button(nav_frame, text="Next Student →", style='Primary.TButton', 
+                       command=lambda: self.show_student_result(students_ids_list[current_index_in_list + 1]))
+            next_btn.pack(side='left', padx=5)
+            ToolTip(next_btn, "View the next student in the list.")
+                       
+        info_frame = ttk.Frame(main_container, borderwidth=1, relief='solid', padding=15, style='TFrame')
+        info_frame.grid(row=1, column=0, sticky='ew', padx=20, pady=(0, 15))
+        
+        info_frame.columnconfigure(1, weight=1)
+        info_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(info_frame, text="Student Name:", font=(FONT_FAMILY, 12, 'bold')).grid(row=0, column=0, sticky='w', padx=(0, 10))
+        ttk.Label(info_frame, text=student_data['name'], font=(FONT_FAMILY, 12)).grid(row=0, column=1, sticky='w')
+        
+        ttk.Label(info_frame, text="Entry Date:", font=(FONT_FAMILY, 11, 'bold')).grid(row=0, column=2, sticky='e', padx=(20, 10))
+        ttk.Label(info_frame, text=student_data['entry_date'], font=(FONT_FAMILY, 11)).grid(row=0, column=3, sticky='e')
+        
+        ttk.Label(info_frame, text="Number of Subjects:", font=(FONT_FAMILY, 11, 'bold')).grid(row=1, column=0, sticky='w', pady=(5, 0), padx=(0, 10))
+        ttk.Label(info_frame, text=student_data['num_subjects'], font=(FONT_FAMILY, 11)).grid(row=1, column=1, sticky='w', pady=(5, 0))
+        
+        table_frame = ttk.Frame(main_container)
+        table_frame.grid(row=2, column=0, sticky='nsew', padx=20, pady=5)
+        
+        columns = ("Subject", "Mark", "Credits", "Semester", "Grade", "Subject GPA")
+        tree = ttk.Treeview(table_frame, columns=columns, show='headings', selectmode='browse')
+        
+        tree.heading("Subject", text="Subject", anchor='w')
+        tree.heading("Mark", text="Mark", anchor='center')
+        tree.heading("Credits", text="Credits", anchor='center')
+        tree.heading("Semester", text="Semester", anchor='center')
+        tree.heading("Grade", text="Grade", anchor='center')
+        tree.heading("Subject GPA", text="Subject GPA", anchor='center')
+        
+        tree.column("Subject", width=200, anchor='w')
+        tree.column("Mark", width=80, anchor='center')
+        tree.column("Credits", width=80, anchor='center')
+        tree.column("Semester", width=100, anchor='center')
+        tree.column("Grade", width=80, anchor='center')
+        tree.column("Subject GPA", width=100, anchor='center')
+        
+        for idx, subject_data in enumerate(student_data["Subjects"]):
+            tree.insert("", "end", values=(
+                subject_data["name"],
+                f"{subject_data['mark']:.2f}",
+                subject_data["credits"],
+                subject_data["semester"] if subject_data["semester"] else "N/A",
+                subject_data["grade"],
+                f"{subject_data['subject_gpa']:.2f}"
+            ), tags=('evenrow' if idx % 2 == 0 else 'oddrow'))
+        
+        # Apply row tagging styles (for alternating row colors)
+        self.style.configure('Treeview', rowheight=28) # Ensure rowheight is applied consistently
+        self.style.map('Treeview', background=[('selected', HIGHLIGHT_COLOR)], foreground=[('selected', 'white')])
+        self.style.tag_configure('evenrow', background=TABLE_ROW_BG_EVEN, foreground=TEXT_COLOR)
+        self.style.tag_configure('oddrow', background=TABLE_ROW_BG_ODD, foreground=TEXT_COLOR)
+
+        tree.pack(side="left", fill="both", expand=True)
+        
+        tree_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree_scrollbar.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=tree_scrollbar.set)
+        
+        # Overall GPA display with emphasis
+        overall_gpa_frame = ttk.Frame(main_container, borderwidth=1, relief='groove', padding=15, style='TFrame')
+        overall_gpa_frame.grid(row=3, column=0, sticky='ew', padx=20, pady=(15, 10))
+        
+        ttk.Label(overall_gpa_frame, text="Overall GPA:",
+                  font=(FONT_FAMILY, 16, 'bold'), foreground=HEADER_COLOR).pack(side='left', padx=(0, 10))
+        ttk.Label(overall_gpa_frame, text=f"{student_data['cumulative_gpa']:.2f}",
+                  font=(FONT_FAMILY, GPA_FONT_SIZE, 'bold'), foreground=HIGHLIGHT_COLOR).pack(side='left')
+        
+        # Export buttons
+        export_button_frame = ttk.Frame(main_container, padding="10 0")
+        export_button_frame.grid(row=4, column=0, sticky='ew', padx=20, pady=(10, 20))
+        export_button_frame.columnconfigure(0, weight=1) 
+        export_button_frame.columnconfigure(1, weight=1)
+        export_button_frame.columnconfigure(2, weight=1)
+
+        export_pdf_btn = ttk.Button(export_button_frame, text="Export Student PDF", style='Info.TButton',
+                   command=lambda: self._export_single_pdf(student_data))
+        export_pdf_btn.grid(row=0, column=0, padx=7)
+        ToolTip(export_pdf_btn, "Generate a detailed PDF report for this student.")
+
+        export_csv_btn = ttk.Button(export_button_frame, text="Export Student CSV", style='Info.TButton',
+                   command=lambda: self._export_single_csv(student_data))
+        export_csv_btn.grid(row=0, column=1, padx=7)
+        ToolTip(export_csv_btn, "Export this student's data to a CSV file.")
+        
+        edit_student_btn = ttk.Button(export_button_frame, text="Edit Student Data", style='Success.TButton',
+                   command=lambda: self.show_student_entry_screen(student_id=student_data['id']))
+        edit_student_btn.grid(row=0, column=2, padx=7)
+        ToolTip(edit_student_btn, "Go back to the entry screen to modify this student's details or subjects.")
+
+        self.show_status_message(f"Results for '{student_data['name']}' displayed.", "info")
+        logging.info(f"Student result screen displayed for student ID: {student_id}")
+
+
+    def _export_single_pdf(self, student_data):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+            initialfile=f"{student_data['name'].replace(' ', '_')}_GPA_Report.pdf",
+            title=f"Save {student_data['name']}'s GPA Report"
+        )
+        if not file_path:
+            return
+        try:
+            self.show_status_message("Generating PDF report...", "info", duration_ms=5000)
+            self.root.update_idletasks() # Force UI update for status message
+            self.report_generator.generate_pdf_report(student_data, file_path)
+            messagebox.showinfo("Export Successful", f"PDF report saved to:\n{file_path}")
+            self.show_status_message(f"PDF report for '{student_data['name']}' generated.", "success")
+            webbrowser.open(file_path)
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export PDF: {e}")
+            self.show_status_message("PDF export failed.", "error")
+            logging.error(f"Error exporting single PDF for {student_data['name']}: {e}", exc_info=True)
+
+    def _export_single_csv(self, student_data):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile=f"{student_data['name'].replace(' ', '_')}_Data.csv",
+            title=f"Save {student_data['name']}'s GPA Data"
+        )
+        if not file_path:
+            return
+        try:
+            self.show_status_message("Exporting CSV data...", "info", duration_ms=3000)
+            self.root.update_idletasks()
+            self.csv_exporter.export_single_student_csv(student_data, file_path)
+            messagebox.showinfo("Export Successful", f"CSV data saved to:\n{file_path}")
+            self.show_status_message(f"CSV data for '{student_data['name']}' exported.", "success")
+            webbrowser.open(os.path.dirname(file_path)) # Open containing folder
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
+            self.show_status_message("CSV export failed.", "error")
+            logging.error(f"Error exporting single CSV for {student_data['name']}: {e}", exc_info=True)
+
+    def _export_all_to_csv(self):
+        all_students = self.db.get_students()
+        if not all_students:
+            messagebox.showinfo("No Data", "No student data to export.")
+            self.show_status_message("No data to export.", "warning")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="All_Students_GPA_Report.csv",
+            title="Save All Student GPA Data"
+        )
+        if not file_path:
+            return
+        try:
+            self.show_status_message("Exporting all students to CSV...", "info", duration_ms=5000)
+            self.root.update_idletasks()
+            self.csv_exporter.export_all_students_csv(all_students, file_path, self.db)
+            messagebox.showinfo("Export Successful", f"All student data saved to:\n{file_path}")
+            self.show_status_message("All students exported to CSV.", "success")
+            webbrowser.open(os.path.dirname(file_path))
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export all data to CSV: {e}")
+            self.show_status_message("Export all to CSV failed.", "error")
+            logging.error(f"Error exporting all students to CSV: {e}", exc_info=True)
+
+    def _export_all_to_pdf(self):
+        all_students = self.db.get_students()
+        if not all_students:
+            messagebox.showinfo("No Data", "No student data to export.")
+            self.show_status_message("No data to export.", "warning")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+            initialfile="All_Students_GPA_Reports.pdf",
+            title="Save All Students' GPA Report"
+        )
+        if not file_path:
+            return
+        try:
+            self.show_status_message("Generating combined PDF reports...", "info", duration_ms=10000)
+            self.root.update_idletasks()
+            self.report_generator.generate_all_pdf_report(all_students, file_path)
+            messagebox.showinfo("Export Successful", f"All student reports combined into a single PDF saved to:\n{file_path}")
+            self.show_status_message("Combined PDF report generated.", "success")
+            webbrowser.open(file_path)
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export all data to PDF: {e}")
+            self.show_status_message("Export all to PDF failed.", "error")
+            logging.error(f"Error exporting all students to PDF: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ProfessionalGPAApp(root)
+    root.mainloop()
